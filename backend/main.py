@@ -24,37 +24,39 @@ _headshot_cache: dict[str, str] = {}
 
 
 def _fetch_headshots(year: int):
-    """Fetch driver headshot URLs from OpenF1 API and cache them."""
+    """Fetch driver headshot URLs from OpenF1 API.
+
+    Note: F1's media CDN serves current-season photos at all URLs, so
+    headshots for historical sessions (e.g. 2024) will show current
+    team uniforms. We only fetch headshots for the current year to avoid
+    showing misleading photos (e.g. Hamilton in Ferrari kit for a 2024
+    Mercedes session).
+    """
     global _headshot_cache
+    _headshot_cache = {}  # Clear cache when session changes
+
+    from datetime import datetime
+    current_year = datetime.now().year
+
+    # Only fetch headshots if session year is current — CDN always shows current photos
+    if year < current_year:
+        return  # No headshots for historical sessions to avoid wrong uniforms
+
     try:
         resp = httpx.get(
             f"https://api.openf1.org/v1/drivers?session_key=latest",
             timeout=10,
         )
         if resp.status_code == 200:
-            for d in resp.json():
-                code = d.get("name_acronym", "")
-                url = d.get("headshot_url", "")
-                if code and url:
-                    _headshot_cache[code] = url
-    except Exception:
-        pass  # headshots are nice-to-have, never block on failure
-
-    # Fallback: also try year-specific session
-    if not _headshot_cache:
-        try:
-            resp = httpx.get(
-                f"https://api.openf1.org/v1/drivers?session_key=latest&year={year}",
-                timeout=10,
-            )
-            if resp.status_code == 200:
-                for d in resp.json():
+            data = resp.json()
+            if isinstance(data, list):
+                for d in data:
                     code = d.get("name_acronym", "")
                     url = d.get("headshot_url", "")
                     if code and url:
                         _headshot_cache[code] = url
-        except Exception:
-            pass
+    except Exception:
+        pass  # headshots are nice-to-have, never block on failure
 
 
 def _get_headshot(driver_code: str) -> Optional[str]:
@@ -165,7 +167,7 @@ def get_overview():
             "driver": code,
             "fullName": r.get("FullName", code),
             "team": r["TeamName"],
-            "teamColor": TEAM_COLORS.get(r["TeamName"], "#FFFFFF"),
+            "teamColor": f"#{r['TeamColor']}" if pd.notna(r.get("TeamColor")) else TEAM_COLORS.get(r["TeamName"], "#FFFFFF"),
             "points": float(r["Points"]) if pd.notna(r["Points"]) else 0,
             "time": str(r["Time"]) if pd.notna(r["Time"]) else "DNF",
             "status": "Finished" if (str(r["Status"]).startswith("+") or r["Status"] == "Finished") else str(r["Status"]),
@@ -530,6 +532,9 @@ def get_energy(driver: str = Query(...)):
     throttle = tel["Throttle"].values
     brake = tel["Brake"].values.astype(float)
     gear = tel["nGear"].values.tolist() if "nGear" in tel.columns else None
+    # DRS: 0=off, 8=eligible, 10/12/14=open (>=10 means flap open)
+    drs_raw = tel["DRS"].values.astype(int) if "DRS" in tel.columns else None
+    drs_map = [1 if (drs_raw is not None and int(drs_raw[i]) >= 10) else 0 for i in range(len(speed))] if drs_raw is not None else None
 
     zones = []
     for i in range(len(tel)):
@@ -998,6 +1003,100 @@ def replay_accuracy_sweep():
     })
 
 
+# ── Track outline cache (shared by replay positions) ──
+_track_outline_cache: dict = {}
+
+
+@app.get("/api/session/replay/positions")
+def replay_positions(lap: int = Query(...)):
+    """Return synchronized X/Y positions for ALL drivers on a given lap."""
+    s = _get_session()
+    laps_df = s.laps
+    results = s.results
+    max_lap = int(laps_df["LapNumber"].max()) if not laps_df.empty else 0
+
+    if lap < 1 or lap > max_lap:
+        raise HTTPException(status_code=400, detail=f"Lap must be between 1 and {max_lap}")
+
+    all_drivers = results.sort_values("Position")["Abbreviation"].tolist()
+
+    # Get track outline (cached)
+    global _track_outline_cache
+    cache_key = id(s)
+    if cache_key not in _track_outline_cache:
+        # Use the fastest lap from any driver for the outline
+        valid = laps_df[laps_df["LapTime"].notna() & laps_df["PitInTime"].isna() & laps_df["PitOutTime"].isna()]
+        if not valid.empty:
+            fl = valid.loc[valid["LapTime"].idxmin()]
+            try:
+                tel = fl.get_telemetry()
+                if tel is not None and not tel.empty and "X" in tel.columns and "Y" in tel.columns:
+                    step = max(1, len(tel) // 400)
+                    _track_outline_cache[cache_key] = {
+                        "x": tel["X"].values[::step].tolist(),
+                        "y": tel["Y"].values[::step].tolist(),
+                    }
+            except Exception:
+                pass
+        if cache_key not in _track_outline_cache:
+            _track_outline_cache[cache_key] = {"x": [], "y": []}
+
+    track_outline = _track_outline_cache[cache_key]
+
+    # Fetch telemetry for all drivers on this lap in parallel
+    def _fetch_tel(drv):
+        dl = laps_df[(laps_df["Driver"] == drv) & (laps_df["LapNumber"] == lap)]
+        if dl.empty:
+            return drv, None
+        try:
+            tel = dl.iloc[0].get_telemetry()
+            if tel is not None and not tel.empty and "X" in tel.columns and "Y" in tel.columns:
+                return drv, tel
+        except Exception:
+            pass
+        return drv, None
+
+    driver_data = {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = {pool.submit(_fetch_tel, drv): drv for drv in all_drivers}
+        for f in as_completed(futures):
+            drv, tel = f.result()
+            if tel is None:
+                continue
+
+            # Resample to ~200 evenly spaced points
+            n = len(tel)
+            n_out = min(200, n)
+            indices = np.linspace(0, n - 1, n_out).astype(int)
+            xs = tel["X"].values[indices].tolist()
+            ys = tel["Y"].values[indices].tolist()
+
+            # Get driver color
+            team = results[results["Abbreviation"] == drv]["TeamName"].values
+            color = TEAM_COLORS.get(team[0], "#FFF") if len(team) > 0 else "#FFF"
+
+            driver_data[drv] = {
+                "color": color,
+                "headshot": _get_headshot(drv),
+                "x": xs,
+                "y": ys,
+            }
+
+    # Start/finish position
+    sf = None
+    if track_outline["x"]:
+        sf = {"x": track_outline["x"][0], "y": track_outline["y"][0]}
+
+    return _sanitize({
+        "lap": lap,
+        "maxLap": max_lap,
+        "trackOutline": track_outline,
+        "startFinish": sf,
+        "drivers": driver_data,
+        "numSamples": 200,
+    })
+
+
 # ── AI Debrief ──────────────────────────────────────────────────────────────
 
 class DebriefRequest(BaseModel):
@@ -1058,8 +1157,178 @@ class ChatRequest(BaseModel):
     history: list = []
 
 
+def _gather_live_chat_context() -> str:
+    """Gather rich live session context for the chat agent."""
+    # Get latest parsed live data
+    try:
+        live = get_live_data()
+    except Exception:
+        return "No live data available. Recording may not be active."
+
+    timing_list = live.get("timing", [])
+    if not timing_list:
+        return "Live session active but no timing data yet."
+
+    lines = []
+    lines.append(f"LIVE SESSION — {live.get('dataPoints', 0)} data points recorded")
+
+    # Weather
+    w = live.get("weather")
+    if w:
+        lines.append(f"Weather: Track {w.get('trackTemp', '?')}°C, Air {w.get('airTemp', '?')}°C, Humidity {w.get('humidity', '?')}%")
+
+    # Race control messages
+    rc = live.get("raceControl", [])
+    if rc:
+        lines.append(f"\nRace Control ({len(rc)} messages):")
+        for msg in rc[-10:]:
+            lines.append(f"  [{msg.get('flag', '')}] {msg.get('message', '')}")
+
+    # Safety car
+    sc = live.get("scStatus")
+    if sc:
+        lines.append(f"\n⚠ SAFETY CAR: {sc}")
+
+    # Current standings with full detail
+    lines.append(f"\nCurrent standings ({len(timing_list)} drivers):")
+    pit_drivers = []
+    for t in timing_list:
+        drv = t.get("name", t.get("driverNumber", "?"))
+        pos = t.get("Position", "?")
+        team = t.get("team", "?")
+        gap = t.get("GapToLeader", "")
+        interval = t.get("IntervalToPositionAhead", "")
+        best_lap = t.get("bestLapTime", "")
+        last_lap = t.get("lastLapTime", "")
+        laps = t.get("NumberOfLaps", 0)
+        compound = t.get("compound", "?")
+        tyre_age = t.get("tyreAge", 0)
+        in_pit = t.get("InPit") in (True, "true", "True")
+        retired = t.get("Retired") in (True, "true", "True")
+        stopped = t.get("Stopped") in (True, "true", "True")
+
+        status = ""
+        if retired:
+            status = " [RETIRED]"
+        elif stopped:
+            status = " [STOPPED]"
+        elif in_pit:
+            status = " [IN PIT]"
+            pit_drivers.append(drv)
+
+        tel = t.get("telemetry", {})
+        speed = tel.get("speed", 0)
+        throttle = tel.get("throttle", 0)
+        gear = tel.get("gear", 0)
+
+        lines.append(
+            f"  P{pos} {drv} ({team}) — Gap: {gap}, Int: {interval}, "
+            f"Best: {best_lap}, Last: {last_lap}, Laps: {laps}, "
+            f"Tyre: {compound} (age {tyre_age}), "
+            f"Speed: {speed}km/h, Throttle: {throttle}%, Gear: {gear}"
+            f"{status}"
+        )
+
+    if pit_drivers:
+        lines.append(f"\nDrivers currently in pit: {', '.join(pit_drivers)}")
+
+    # Stint timeline (pit stop history)
+    stint_tl = live.get("stintTimeline", {})
+    if stint_tl:
+        lines.append("\nTyre stints:")
+        for drv, stints in stint_tl.items():
+            stint_strs = []
+            for s in stints:
+                stint_strs.append(f"{s['compound']}({s['laps']}L)")
+            if len(stints) > 1:
+                lines.append(f"  {drv}: {' → '.join(stint_strs)} [{len(stints)-1} stop(s)]")
+
+    # Per-driver telemetry analysis (clipping, ERS, speed stats)
+    lines.append("\nPer-driver telemetry analysis:")
+    for t in timing_list[:22]:
+        drv_num = t.get("driverNumber", "")
+        drv_name = t.get("name", drv_num)
+        history = _live_telemetry_history.get(drv_num, [])
+        if len(history) < 5:
+            continue
+
+        # Speed stats
+        speeds = [s["speed"] for s in history if s["speed"] > 0]
+        if speeds:
+            peak_speed = max(speeds)
+            avg_speed = sum(speeds) / len(speeds)
+        else:
+            peak_speed = avg_speed = 0
+
+        # Clipping/lift-coast analysis
+        patterns = _detect_clipping_patterns(history)
+        pattern_strs = []
+        for p in patterns:
+            pattern_strs.append(f"{p['type']}({p['confidence']*100:.0f}%)")
+
+        # ERS estimate
+        ers = _calc_est_ers_usage(history)
+        ers_str = f"{ers*100:.0f}%" if ers is not None else "N/A"
+
+        lines.append(
+            f"  {drv_name}: peak {peak_speed}km/h, avg {avg_speed:.0f}km/h, "
+            f"est.ERS: {ers_str}, "
+            f"flags: {', '.join(pattern_strs) if pattern_strs else 'clean'} "
+            f"({len(history)} samples)"
+        )
+
+        # Per-zone analysis (where on track is clipping/lift-coast happening)
+        fused = _fuse_telemetry_with_location(drv_num)
+        outline = _circuit_outline_cache.get("outline", [])
+        zones = _segment_track_zones(outline)
+        if fused and zones:
+            zone_analysis = _analyze_per_zone(fused, zones, outline)
+            clip_zones = [z for z in zone_analysis if z.get("clippingPct", 0) > 20]
+            lift_zones = [z for z in zone_analysis if z.get("liftCoastSamples", 0) > 2]
+            if clip_zones:
+                clip_strs = [f"{z['label']}({z['clippingPct']:.0f}%)" for z in clip_zones]
+                lines.append(f"    Clipping zones: {', '.join(clip_strs)}")
+            if lift_zones:
+                lift_strs = [f"{z['label']}({z['liftCoastSamples']}x)" for z in lift_zones]
+                lines.append(f"    Lift-coast zones: {', '.join(lift_strs)}")
+
+    # Gap evolution
+    gap_evo = live.get("gapEvolution", {})
+    if gap_evo:
+        lines.append("\nGap evolution (recent):")
+        for drv, gaps in gap_evo.items():
+            if gaps:
+                latest = gaps[-1]
+                lines.append(f"  {drv}: gap {latest.get('gap', '?')}s at lap {latest.get('lap', '?')}")
+
+    # Pace data
+    pace = live.get("paceData", {})
+    if pace:
+        lines.append("\nLap time history:")
+        for drv, laps_data in pace.items():
+            if laps_data:
+                times = [l.get("time", 0) for l in laps_data if l.get("time")]
+                if times:
+                    best = min(times)
+                    last = times[-1]
+                    lines.append(f"  {drv}: best {best:.3f}s, last {last:.3f}s, {len(times)} laps")
+
+    # Alerts
+    alerts = live.get("alerts", [])
+    if alerts:
+        lines.append("\nActive alerts:")
+        for a in alerts:
+            lines.append(f"  [{a.get('severity', 'info')}] {a.get('message', '')}")
+
+    return "\n".join(lines)
+
+
 def _gather_chat_context(page: str) -> str:
     """Gather relevant session data as context based on which page the user is on."""
+    # Live Pit Wall uses live data, not post-session FastF1
+    if page == "live":
+        return _gather_live_chat_context()
+
     # Compare page uses its own data source
     if page == "compare":
         if _last_compare_result is None:
@@ -1170,6 +1439,15 @@ def _gather_chat_context(page: str) -> str:
     if page in ("energy", "general"):
         base += "\nEnergy Map models MGU-K harvest/deploy (2026 regs: 350kW, 4MJ battery). Shows braking zones, regen, and power clipping.\n"
 
+    if page in ("circuit", "general"):
+        base += "\nCircuit Lab analysis overlays:\n"
+        base += "- Clipping: throttle>=98%, brake==0, speed>250, speed not increasing = engine power-limited\n"
+        base += "- ERS Deploy (estimated): full throttle + strong acceleration = battery boost likely active\n"
+        base += "- Lift & Coast: off throttle, off brake, high speed = fuel/energy saving strategy\n"
+        base += "- DRS: Drag Reduction System — rear wing flap opens on straights when within 1s of car ahead. DRS value >=10 = flap open. Available in 2024/2025 data; 2026+ uses X/Z mode instead.\n"
+        base += "These are estimates based on telemetry patterns. Real ERS data is not publicly available.\n"
+        base += "Corner cards show per-corner entry/exit speed, clipping %, ERS deploy %, and lift-coast count.\n"
+
     return base
 
 
@@ -1179,6 +1457,17 @@ def chat_with_ai(req: ChatRequest):
     context = _gather_chat_context(req.page)
 
     # Build conversation messages
+    live_rules = ""
+    if req.page == "live":
+        live_rules = """
+- You have LIVE telemetry data from the current session (speed, throttle, brake, gear, RPM per driver).
+- You have per-driver analysis: clipping detection, lift-and-coast, energy saving flags, estimated ERS usage.
+- You have per-zone analysis: which track zones (turns/straights) show clipping or lift-and-coast for each driver.
+- You have pit stop history, tyre stints, gap evolution, and race control messages.
+- ERS estimates are approximate (derived from throttle/acceleration patterns — no actual battery data is public).
+- When asked "where" something happened, reference track zones (Turn 1, Straight 2, etc.).
+- When asked about battery/ERS, be honest that it's estimated, not actual MGU-K data."""
+
     system_prompt = f"""You are an expert F1 race engineer assistant embedded in a race analysis dashboard.
 You have deep knowledge of Formula 1 strategy, telemetry, tyre management, and race dynamics.
 
@@ -1193,7 +1482,7 @@ Rules:
 - Reference specific drivers, lap numbers, and data points.
 - If asked about something not in the data, say so honestly.
 - Use technical F1 terminology where appropriate.
-- Keep responses under 200 words unless the question demands more detail."""
+- Keep responses under 200 words unless the question demands more detail.{live_rules}"""
 
     messages = []
     # Include chat history (last 6 messages max for context window)
@@ -1429,6 +1718,78 @@ def get_circuit(
                 "distance": round(float(s_start), 0),
             })
 
+    # ── Clipping / ERS / Lift-coast analysis per corner zone ──
+    clipping_map = []  # per-sample: 0=normal, 1=clipping
+    ers_deploy_map = []  # per-sample: 0=not deploying, 1=deploying
+    lift_coast_map = []  # per-sample: 0=normal, 1=lift-coast
+    for i in range(len(speed)):
+        thr, brk, spd = float(throttle[i]), float(brake[i]), float(speed[i])
+        # Clipping: full throttle, no brake, high speed, but not accelerating
+        is_clipping = 0
+        if i > 0 and thr >= 95 and brk == 0 and spd > 200:
+            speed_delta = spd - float(speed[i - 1])
+            if speed_delta <= 0:
+                is_clipping = 1
+        clipping_map.append(is_clipping)
+
+        # ERS deploy: full throttle and actually accelerating
+        is_deploy = 0
+        if i > 0 and thr >= 90 and brk == 0:
+            speed_delta = spd - float(speed[i - 1])
+            if speed_delta > 1:
+                is_deploy = 1
+        ers_deploy_map.append(is_deploy)
+
+        # Lift-coast: low throttle, no brake, high speed
+        is_lift = 1 if (thr < 40 and brk == 0 and spd > 150) else 0
+        lift_coast_map.append(is_lift)
+
+    # Per-corner analysis summary
+    corner_analysis = []
+    for ci, c in enumerate(corners):
+        c_dist = c["distance"]
+        # Zone around corner: 100m before to 200m after
+        zone_start = c_dist - 100
+        zone_end = c_dist + 200
+        mask = (dist >= zone_start) & (dist < zone_end)
+        n_samples = int(mask.sum())
+        if n_samples == 0:
+            corner_analysis.append({
+                "corner": ci + 1, "clippingPct": 0, "ersDeployPct": 0,
+                "liftCoastSamples": 0, "minSpeed": float(c["speed"]),
+                "entrySpeed": 0, "exitSpeed": 0,
+            })
+            continue
+
+        clip_pct = float(np.array(clipping_map)[mask].sum() / n_samples * 100) if n_samples > 0 else 0
+        ers_pct = float(np.array(ers_deploy_map)[mask].sum() / n_samples * 100) if n_samples > 0 else 0
+        lift_n = int(np.array(lift_coast_map)[mask].sum())
+        zone_speeds = speed[mask]
+        entry_speed = float(zone_speeds[0]) if len(zone_speeds) > 0 else 0
+        exit_speed = float(zone_speeds[-1]) if len(zone_speeds) > 0 else 0
+        min_speed = float(zone_speeds.min()) if len(zone_speeds) > 0 else 0
+
+        corner_analysis.append({
+            "corner": ci + 1,
+            "clippingPct": round(clip_pct, 1),
+            "ersDeployPct": round(ers_pct, 1),
+            "liftCoastSamples": lift_n,
+            "minSpeed": round(min_speed, 1),
+            "entrySpeed": round(entry_speed, 1),
+            "exitSpeed": round(exit_speed, 1),
+        })
+
+    # Overall ERS estimate for the lap
+    full_throttle_samples = sum(1 for t in throttle if t >= 95)
+    strong_accel_samples = sum(1 for i in range(1, len(speed))
+                               if throttle[i] >= 95 and (speed[i] - speed[i-1]) > 2)
+    overall_ers = round(strong_accel_samples / full_throttle_samples, 3) if full_throttle_samples > 0 else None
+
+    # Overall clipping percentage
+    clip_total = sum(clipping_map)
+    high_speed_total = sum(1 for i in range(len(speed)) if speed[i] > 200 and throttle[i] >= 95)
+    overall_clipping = round(clip_total / high_speed_total * 100, 1) if high_speed_total > 0 else 0
+
     team = results[results["Abbreviation"] == driver]["TeamName"].values
     color = TEAM_COLORS.get(team[0], "#FFF") if len(team) > 0 else "#FFF"
 
@@ -1448,6 +1809,14 @@ def get_circuit(
         "zones": [zones[i] for i in range(0, len(zones), step)],
         "corners": corners,
         "miniSectors": mini_sectors,
+        "clipping": [clipping_map[i] for i in range(0, len(clipping_map), step)],
+        "ersDeployment": [ers_deploy_map[i] for i in range(0, len(ers_deploy_map), step)],
+        "liftCoast": [lift_coast_map[i] for i in range(0, len(lift_coast_map), step)],
+        "drs": [drs_map[i] for i in range(0, len(drs_map), step)] if drs_map else None,
+        "drsAvailable": drs_map is not None and any(d == 1 for d in drs_map),
+        "cornerAnalysis": corner_analysis,
+        "overallErs": overall_ers,
+        "overallClipping": overall_clipping,
     })
 
 
@@ -1616,11 +1985,15 @@ def get_drivers():
     for _, r in results.sort_values("Position").iterrows():
         code = r["Abbreviation"]
         number = int(r["DriverNumber"]) if pd.notna(r.get("DriverNumber")) else None
+        # Prefer FastF1's session-specific TeamColor, fall back to static map
+        color = TEAM_COLORS.get(r["TeamName"], "#FFFFFF")
+        if pd.notna(r.get("TeamColor")):
+            color = f"#{r['TeamColor']}"
         drivers.append({
             "code": code,
             "name": r.get("FullName", code),
             "team": r["TeamName"],
-            "color": TEAM_COLORS.get(r["TeamName"], "#FFFFFF"),
+            "color": color,
             "number": number,
             "headshot": _get_headshot(code),
         })
@@ -1650,6 +2023,7 @@ _live_error = None
 _live_telemetry_history: dict[str, list] = {}
 _live_positions: dict[str, dict] = {}
 _live_driver_info_cache: dict = {}
+_live_pos_history: dict[str, list] = {}  # per driver: list of {"x", "y", "ts"} for location fusion
 
 
 @app.get("/api/live/status")
@@ -1941,6 +2315,13 @@ def get_live_data():
                                     "y": new_y,
                                     "status": pos_info.get("Status", ""),
                                 }
+                                # Store timestamped position for telemetry-location fusion
+                                pos_ts = pos_entry.get("Timestamp", ts)
+                                if drv_num not in _live_pos_history:
+                                    _live_pos_history[drv_num] = []
+                                _live_pos_history[drv_num].append({"x": new_x, "y": new_y, "ts": pos_ts})
+                                if len(_live_pos_history[drv_num]) > 2000:
+                                    _live_pos_history[drv_num] = _live_pos_history[drv_num][-2000:]
                                 # Also store for circuit outline extraction
                                 if drv_num not in _position_history:
                                     _position_history[drv_num] = []
@@ -2313,6 +2694,225 @@ def _calc_est_ers_usage(history: list[dict]) -> float | None:
     if full_throttle == 0:
         return None
     return round(strong_accel / full_throttle, 3)
+
+
+# ── Telemetry-Location Fusion & Zone Analysis ────────────────────────────
+
+def _fuse_telemetry_with_location(drv_num: str) -> list[dict]:
+    """Join telemetry samples with nearest GPS position by timestamp.
+    Returns list of {speed, throttle, brake, gear, rpm, x, y, ts}."""
+    history = _live_telemetry_history.get(drv_num, [])
+    pos_hist = _live_pos_history.get(drv_num, [])
+    if not history or not pos_hist:
+        return []
+
+    # Build position index sorted by timestamp for binary search
+    pos_sorted = sorted(pos_hist, key=lambda p: p.get("ts", ""))
+    pos_times = [p.get("ts", "") for p in pos_sorted]
+
+    import bisect
+    fused = []
+    for tel in history:
+        tel_ts = tel.get("ts", "")
+        if not tel_ts:
+            continue
+        # Find nearest position by timestamp
+        idx = bisect.bisect_left(pos_times, tel_ts)
+        # Check closest of idx-1 and idx
+        best_pos = None
+        if idx < len(pos_sorted):
+            best_pos = pos_sorted[idx]
+        if idx > 0:
+            prev = pos_sorted[idx - 1]
+            if best_pos is None:
+                best_pos = prev
+            else:
+                # Pick whichever timestamp is closer
+                if abs(ord(prev["ts"][-1]) - ord(tel_ts[-1])) < abs(ord(best_pos["ts"][-1]) - ord(tel_ts[-1])):
+                    best_pos = prev
+        if best_pos:
+            fused.append({
+                "speed": tel["speed"],
+                "throttle": tel["throttle"],
+                "brake": tel["brake"],
+                "gear": tel["gear"],
+                "rpm": tel["rpm"],
+                "x": best_pos["x"],
+                "y": best_pos["y"],
+                "ts": tel_ts,
+            })
+    return fused
+
+
+def _segment_track_zones(circuit_outline: list[dict]) -> list[dict]:
+    """Divide circuit into zones (straights vs corners) based on curvature.
+    Returns list of {type: 'straight'|'corner', start_idx, end_idx, x, y}."""
+    import math
+    if len(circuit_outline) < 10:
+        return []
+
+    pts = circuit_outline
+    zones = []
+    # Compute heading change between consecutive segments
+    headings = []
+    for i in range(1, len(pts)):
+        dx = pts[i]["x"] - pts[i-1]["x"]
+        dy = pts[i]["y"] - pts[i-1]["y"]
+        headings.append(math.atan2(dy, dx))
+
+    # Compute curvature (heading change rate)
+    curvatures = []
+    for i in range(1, len(headings)):
+        delta = headings[i] - headings[i-1]
+        # Normalize to [-pi, pi]
+        while delta > math.pi: delta -= 2 * math.pi
+        while delta < -math.pi: delta += 2 * math.pi
+        curvatures.append(abs(delta))
+
+    # Smooth curvatures to avoid micro-zone flickering (rolling avg window=5)
+    smooth_window = min(5, len(curvatures))
+    smoothed_curv = []
+    for i in range(len(curvatures)):
+        lo = max(0, i - smooth_window // 2)
+        hi = min(len(curvatures), i + smooth_window // 2 + 1)
+        smoothed_curv.append(sum(curvatures[lo:hi]) / (hi - lo))
+
+    # Classify: low curvature = straight, high = corner
+    threshold = 0.25  # radians — higher = fewer zones
+    min_zone_len = max(3, len(pts) // 50)  # minimum points per zone to avoid micro-zones
+    zone_start = 0
+    is_straight = smoothed_curv[0] < threshold if smoothed_curv else True
+
+    for i in range(1, len(smoothed_curv)):
+        cur_straight = smoothed_curv[i] < threshold
+        if cur_straight != is_straight and (i - zone_start) >= min_zone_len:
+            mid_idx = (zone_start + i) // 2 + 1
+            zones.append({
+                "type": "straight" if is_straight else "corner",
+                "start_idx": zone_start,
+                "end_idx": i,
+                "x": pts[min(mid_idx, len(pts) - 1)]["x"],
+                "y": pts[min(mid_idx, len(pts) - 1)]["y"],
+            })
+            zone_start = i
+            is_straight = cur_straight
+
+    # Final zone
+    if zone_start < len(smoothed_curv):
+        mid_idx = min((zone_start + len(smoothed_curv)) // 2 + 1, len(pts) - 1)
+        zones.append({
+            "type": "straight" if is_straight else "corner",
+            "start_idx": zone_start,
+            "end_idx": len(smoothed_curv),
+            "x": pts[mid_idx]["x"],
+            "y": pts[mid_idx]["y"],
+        })
+
+    # Number the corners and straights
+    corner_num = 0
+    straight_num = 0
+    for z in zones:
+        if z["type"] == "corner":
+            corner_num += 1
+            z["label"] = f"Turn {corner_num}"
+        else:
+            straight_num += 1
+            z["label"] = f"Straight {straight_num}"
+
+    return zones
+
+
+def _analyze_per_zone(fused_data: list[dict], zones: list[dict], circuit_outline: list[dict]) -> list[dict]:
+    """Analyze telemetry per track zone — detect clipping/ERS per zone."""
+    import math
+    if not fused_data or not zones or not circuit_outline:
+        return []
+
+    # For each fused sample, find which zone it's closest to
+    zone_samples: dict[int, list] = {i: [] for i in range(len(zones))}
+
+    for sample in fused_data:
+        sx, sy = sample["x"], sample["y"]
+        # Find nearest circuit point
+        min_dist = float("inf")
+        nearest_idx = 0
+        for j, cp in enumerate(circuit_outline):
+            dx = sx - cp["x"]
+            dy = sy - cp["y"]
+            d = dx * dx + dy * dy
+            if d < min_dist:
+                min_dist = d
+                nearest_idx = j
+
+        # Map circuit point index to zone
+        for zi, z in enumerate(zones):
+            if z["start_idx"] <= nearest_idx <= z["end_idx"]:
+                zone_samples[zi].append(sample)
+                break
+
+    # Analyze each zone
+    results = []
+    for zi, z in enumerate(zones):
+        samples = zone_samples.get(zi, [])
+        if not samples:
+            results.append({**z, "samples": 0})
+            continue
+
+        speeds = [s["speed"] for s in samples if s["speed"] > 0]
+        throttles = [s["throttle"] for s in samples]
+
+        peak_speed = max(speeds) if speeds else 0
+        avg_speed = sum(speeds) / len(speeds) if speeds else 0
+        avg_throttle = sum(throttles) / len(throttles) if throttles else 0
+
+        # Clipping in this zone
+        clip_count = 0
+        clip_total = 0
+        for i in range(1, len(samples)):
+            cur, prev = samples[i], samples[i-1]
+            if cur["throttle"] >= 98 and cur["brake"] == 0 and cur["speed"] > 200:
+                clip_total += 1
+                if cur["speed"] <= prev["speed"]:
+                    clip_count += 1
+
+        clipping_pct = (clip_count / clip_total * 100) if clip_total > 0 else 0
+
+        # Lift-coast in this zone
+        lift_count = sum(1 for s in samples if s["throttle"] < 50 and s["brake"] == 0 and s["speed"] > 150)
+
+        results.append({
+            **z,
+            "samples": len(samples),
+            "peakSpeed": peak_speed,
+            "avgSpeed": round(avg_speed),
+            "avgThrottle": round(avg_throttle),
+            "clippingPct": round(clipping_pct, 1),
+            "liftCoastSamples": lift_count,
+        })
+
+    return results
+
+
+@app.get("/api/live/driver/{driver_number}/zones")
+def get_driver_zone_analysis(driver_number: str):
+    """Per-zone telemetry analysis for a driver — fuses telemetry with GPS."""
+    fused = _fuse_telemetry_with_location(driver_number)
+    outline = _circuit_outline_cache.get("outline", [])
+    zones = _segment_track_zones(outline)
+    analysis = _analyze_per_zone(fused, zones, outline)
+
+    driver_info = _live_driver_info_cache.get(driver_number)
+    drv_name = driver_number
+    if driver_info:
+        drv_name = driver_info[0]
+
+    return {
+        "driver": drv_name,
+        "driverNumber": driver_number,
+        "zones": analysis,
+        "fusedSamples": len(fused),
+        "totalZones": len(zones),
+    }
 
 
 # ── Session Analysis Log ──────────────────────────────────────────────────
