@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
-import { Play, Pause, RotateCcw, Target, Trophy, CheckCircle, XCircle, BarChart3, Microscope } from "lucide-react";
+import { Play, Pause, RotateCcw, Target, Trophy, CheckCircle, XCircle, BarChart3, Microscope, FastForward } from "lucide-react";
 import Plot from "react-plotly.js";
 import GlassCard from "../components/GlassCard";
 import PageHeader from "../components/PageHeader";
 import LoadingSpinner from "../components/LoadingSpinner";
+import CircuitSVG from "../components/CircuitSVG";
 import { useApi } from "../hooks/useApi";
 
 const plotLayout = {
@@ -33,17 +34,27 @@ export default function RaceReplay() {
   const [playing, setPlaying] = useState(false);
   const [sweep, setSweep] = useState(null);
   const [sweepLoading, setSweepLoading] = useState(false);
+  const [posData, setPosData] = useState(null);
+  const [trackProgress, setTrackProgress] = useState(0); // 0-1 intra-lap animation
+  const [playSpeed, setPlaySpeed] = useState(1);
   const intervalRef = useRef(null);
   const debounceRef = useRef(null);
+  const animRef = useRef(null);
+  const progressRef = useRef(0);
+  const lastFrameRef = useRef(0);
 
   const maxLap = data?.maxLap || 60;
 
-  // Fetch replay data for a given lap
+  // Fetch replay data + positions for a given lap
   const fetchLap = useCallback(
     async (targetLap) => {
       try {
-        const result = await api.call(`/api/session/replay?lap=${targetLap}`);
+        const [result, posResult] = await Promise.all([
+          api.call(`/api/session/replay?lap=${targetLap}`),
+          api.call(`/api/session/replay/positions?lap=${targetLap}`),
+        ]);
         setData(result);
+        setPosData(posResult);
       } catch (e) {
         console.error("Failed to fetch replay data:", e);
       } finally {
@@ -68,10 +79,27 @@ export default function RaceReplay() {
     return () => clearTimeout(debounceRef.current);
   }, [lap]);
 
-  // Auto-play interval
+  // Intra-lap animation: smoothly move dots from 0 to 1 within the lap
   useEffect(() => {
-    if (playing) {
-      intervalRef.current = setInterval(() => {
+    if (!playing || !posData?.drivers) {
+      if (animRef.current) cancelAnimationFrame(animRef.current);
+      return;
+    }
+    const lapDurationMs = 1500 / playSpeed; // time per lap in animation
+
+    const animate = (timestamp) => {
+      if (!lastFrameRef.current) lastFrameRef.current = timestamp;
+      const elapsed = timestamp - lastFrameRef.current;
+      lastFrameRef.current = timestamp;
+
+      progressRef.current = Math.min(progressRef.current + elapsed / lapDurationMs, 1);
+      setTrackProgress(progressRef.current);
+
+      if (progressRef.current >= 1) {
+        // Lap done — advance to next lap
+        progressRef.current = 0;
+        lastFrameRef.current = 0;
+        setTrackProgress(0);
         setLap((prev) => {
           if (prev >= maxLap) {
             setPlaying(false);
@@ -79,12 +107,16 @@ export default function RaceReplay() {
           }
           return prev + 1;
         });
-      }, 500);
-    }
-    return () => {
-      if (intervalRef.current) clearInterval(intervalRef.current);
+        return;
+      }
+      animRef.current = requestAnimationFrame(animate);
     };
-  }, [playing, maxLap]);
+
+    progressRef.current = 0;
+    lastFrameRef.current = 0;
+    animRef.current = requestAnimationFrame(animate);
+    return () => { if (animRef.current) cancelAnimationFrame(animRef.current); };
+  }, [playing, posData, playSpeed, maxLap]);
 
   const handleSliderChange = (e) => {
     const value = parseInt(e.target.value, 10);
@@ -163,7 +195,7 @@ export default function RaceReplay() {
       {/* Lap slider controls */}
       <GlassCard className="p-6" hover delay={0.1}>
         <div className="flex items-center gap-6">
-          {/* Play / Pause / Reset buttons */}
+          {/* Play / Pause / Reset / Speed buttons */}
           <div className="flex items-center gap-2">
             <button
               onClick={() => setPlaying(!playing)}
@@ -183,6 +215,18 @@ export default function RaceReplay() {
             >
               <RotateCcw className="w-4 h-4 text-zinc-400" />
             </button>
+            <div className="flex gap-1 ml-2">
+              {[1, 2, 4].map((s) => (
+                <button
+                  key={s}
+                  onClick={() => setPlaySpeed(s)}
+                  className={`px-2 py-1.5 rounded-lg text-[10px] font-bold transition-all
+                    ${playSpeed === s ? "bg-white/15 text-white" : "bg-white/5 text-zinc-500 hover:bg-white/10"}`}
+                >
+                  {s}x
+                </button>
+              ))}
+            </div>
           </div>
 
           {/* Slider */}
@@ -214,6 +258,39 @@ export default function RaceReplay() {
           </div>
         </div>
       </GlassCard>
+
+      {/* ── Circuit Map — all cars moving ── */}
+      {posData?.trackOutline?.x?.length > 0 && (
+        <GlassCard className="p-4 relative overflow-hidden" hover delay={0.12}>
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-white uppercase tracking-widest">
+              Circuit — Lap {lap}
+            </h3>
+            {lap >= maxLap && (
+              <span className="text-xs font-bold text-white bg-white/10 px-3 py-1 rounded-full animate-pulse">
+                FINISH
+              </span>
+            )}
+          </div>
+          <CircuitSVG
+            outline={posData.trackOutline}
+            drivers={Object.entries(posData.drivers || {}).map(([drv, d]) => {
+              const n = d.x.length;
+              const idx = Math.min(Math.round(trackProgress * (n - 1)), n - 1);
+              return {
+                id: drv,
+                x: d.x[idx],
+                y: d.y[idx],
+                color: d.color || "#fff",
+                label: drv,
+              };
+            })}
+            showStartFinish
+            showCheckered={lap >= maxLap}
+            height={480}
+          />
+        </GlassCard>
+      )}
 
       {/* Main content: standings + win probability */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
