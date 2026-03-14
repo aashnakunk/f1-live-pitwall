@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from "react";
-import { motion } from "framer-motion";
+import { motion, AnimatePresence } from "framer-motion";
 import Plot from "react-plotly.js";
 import {
   Radio, Wifi, WifiOff, Play, Square, RefreshCw,
   Clock, Trash2, Activity, Zap, TrendingDown, Battery, Gauge, Flag,
+  BatteryCharging, BatteryLow, BatteryMedium, BatteryFull, X, Info,
 } from "lucide-react";
 import GlassCard from "../components/GlassCard";
 import PageHeader from "../components/PageHeader";
@@ -32,6 +33,112 @@ const FLAG_CONFIG = {
   ENERGY_SAVING: { icon: Battery, color: "#eab308", bg: "bg-yellow-500/10", border: "border-yellow-500/20", text: "text-yellow-300", label: "Energy Saving" },
 };
 
+const FLAG_DEFINITIONS = {
+  CLIPPING: {
+    title: "Battery Clipping",
+    what: "The car's battery (ERS) has run out of stored energy. The MGU-K can no longer deploy its additional 350kW of electric power.",
+    how: "Detected when: full throttle (>98%) + no braking + speed >250 km/h, but speed is NOT increasing. The car should be accelerating but isn't — power is limited.",
+    impact: "Driver loses ~3-5 km/h on straights. Lap time cost: 0.3-0.8s depending on track. More clipping = worse energy management earlier in the lap.",
+    severity: "high",
+  },
+  LIFT_COAST: {
+    title: "Lift & Coast",
+    what: "The driver lifts off the throttle early before a braking zone, coasting at high speed to save energy and brake wear.",
+    how: "Detected when: throttle <50% + no braking + speed >200 km/h. The driver is deliberately not accelerating OR braking — just coasting.",
+    impact: "Costs ~0.1-0.3s per corner but saves ERS energy for deployment elsewhere. Strategic trade-off managed by the race engineer.",
+    severity: "medium",
+  },
+  ENERGY_SAVING: {
+    title: "Energy Saving Mode",
+    what: "The car's power unit is deploying less energy than earlier in the stint — acceleration is weaker despite similar throttle inputs.",
+    how: "Detected by comparing acceleration in the first half vs second half of the telemetry window. A >30% drop in acceleration rate triggers this flag.",
+    impact: "Often seen in the second half of stints or when managing battery for a critical overtake/defense later. Can cost 0.5-1.5s per lap.",
+    severity: "low",
+  },
+  ERS_DEPLOY: {
+    title: "Potential ERS Deployment",
+    what: "Estimated percentage of time the MGU-K electric motor is actively boosting the car's power. In 2026, the MGU-K adds 350kW (from a 4MJ battery).",
+    how: "We measure: when at full throttle (>95%), is speed actually increasing (>2 km/h gain)? The ratio of 'accelerating' vs 'total full throttle' = estimated deployment rate.",
+    impact: "Higher % = more electric boost available. Below 40% suggests the driver is conserving energy or the battery is depleted. This is an ESTIMATE — real battery data isn't public.",
+    severity: "info",
+  },
+};
+
+function GlassDefinition({ type, onClose }) {
+  const def = FLAG_DEFINITIONS[type];
+  if (!def) return null;
+  const severityColors = {
+    high: "border-orange-500/30 bg-orange-500/5",
+    medium: "border-blue-500/30 bg-blue-500/5",
+    low: "border-yellow-500/30 bg-yellow-500/5",
+    info: "border-emerald-500/30 bg-emerald-500/5",
+  };
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 10, scale: 0.95 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: 10, scale: 0.95 }}
+      className={`absolute z-50 left-0 right-0 mt-2 rounded-xl border backdrop-blur-xl p-4 shadow-2xl ${severityColors[def.severity]}`}
+      style={{ background: "rgba(15, 15, 20, 0.92)" }}
+    >
+      <div className="flex items-start justify-between mb-3">
+        <h4 className="text-white font-bold text-sm">{def.title}</h4>
+        <button onClick={onClose} className="text-zinc-500 hover:text-white transition"><X size={14} /></button>
+      </div>
+      <div className="space-y-2.5 text-[11px] leading-relaxed">
+        <div>
+          <span className="text-zinc-400 font-semibold uppercase tracking-wider text-[9px]">What is it</span>
+          <p className="text-zinc-300 mt-0.5">{def.what}</p>
+        </div>
+        <div>
+          <span className="text-zinc-400 font-semibold uppercase tracking-wider text-[9px]">How we detect it</span>
+          <p className="text-zinc-300 mt-0.5">{def.how}</p>
+        </div>
+        <div>
+          <span className="text-zinc-400 font-semibold uppercase tracking-wider text-[9px]">Performance impact</span>
+          <p className="text-zinc-300 mt-0.5">{def.impact}</p>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+function BatteryGauge({ value }) {
+  // value: 0-1 (estimated deployment ratio)
+  const pct = Math.min(Math.max((value || 0) * 100, 0), 100);
+  const segments = 8;
+  const filledSegs = Math.round((pct / 100) * segments);
+  const color = pct > 70 ? "#4ade80" : pct > 40 ? "#FF8000" : "#ef4444";
+  const BatIcon = pct > 70 ? BatteryFull : pct > 40 ? BatteryMedium : pct > 15 ? BatteryLow : BatteryCharging;
+
+  return (
+    <div className="flex flex-col items-center gap-1">
+      <div className="relative w-14 h-24 rounded-lg border-2 border-zinc-600 bg-black/40 p-1 flex flex-col-reverse gap-0.5"
+        style={{ borderColor: color + "60" }}>
+        {/* Battery cap */}
+        <div className="absolute -top-2 left-1/2 -translate-x-1/2 w-5 h-2 rounded-t-sm" style={{ background: color + "40", border: `1px solid ${color}40` }} />
+        {/* Segments */}
+        {Array.from({ length: segments }).map((_, i) => (
+          <div
+            key={i}
+            className="flex-1 rounded-sm transition-all duration-700"
+            style={{
+              background: i < filledSegs ? color : "rgba(255,255,255,0.03)",
+              opacity: i < filledSegs ? 0.7 + (i / segments) * 0.3 : 1,
+              boxShadow: i < filledSegs ? `0 0 8px ${color}40` : "none",
+            }}
+          />
+        ))}
+      </div>
+      <div className="flex items-center gap-1">
+        <BatIcon size={11} style={{ color }} />
+        <span className="font-mono text-sm font-bold" style={{ color }}>{pct.toFixed(0)}%</span>
+      </div>
+      <span className="text-[8px] text-zinc-500 uppercase tracking-wider">Potential Deploy</span>
+    </div>
+  );
+}
+
 export default function LivePitWall() {
   const { call, loading } = useApi();
   const [status, setStatus] = useState(null);
@@ -40,6 +147,8 @@ export default function LivePitWall() {
   const [selectedDrivers, setSelectedDrivers] = useState(new Set());
   const [driverDetails, setDriverDetails] = useState({});
   const [circuitOutline, setCircuitOutline] = useState([]);
+  const [openDefinition, setOpenDefinition] = useState(null); // e.g., "CLIPPING" or "ERS_DEPLOY"
+  const [zoneData, setZoneData] = useState({}); // per driver zone analysis
   const intervalRef = useRef(null);
 
   useEffect(() => { fetchStatus(); fetchData(); fetchCircuit(); }, []);
@@ -74,6 +183,9 @@ export default function LivePitWall() {
   const fetchDriverDetail = async (driverNumber) => {
     const data = await call(`/api/live/driver/${driverNumber}`);
     if (data) setDriverDetails((prev) => ({ ...prev, [driverNumber]: data }));
+    // Also fetch zone analysis for heatmap
+    const zones = await call(`/api/live/driver/${driverNumber}/zones`);
+    if (zones) setZoneData((prev) => ({ ...prev, [driverNumber]: zones }));
   };
 
   const toggleDriver = (driverNumber) => {
@@ -228,6 +340,35 @@ export default function LivePitWall() {
                           <path d={circuitPath} fill="none" stroke="rgba(255,255,255,0.15)"
                             strokeWidth={60} strokeLinejoin="round" strokeLinecap="round" />
                         )}
+
+                        {/* Zone heatmap overlay — shows clipping/lift-coast for selected driver */}
+                        {(() => {
+                          const selArr = [...selectedDrivers];
+                          if (selArr.length === 0) return null;
+                          const zd = zoneData[selArr[0]];
+                          if (!zd?.zones?.length) return null;
+                          return zd.zones.filter(z => z.samples > 0).map((z, i) => {
+                            const clip = z.clippingPct || 0;
+                            const lift = z.liftCoastSamples || 0;
+                            // Color: green=clean, orange=some clipping, red=heavy clipping, blue=lift-coast
+                            let color = "#4ade8040"; // clean
+                            let radius = 400;
+                            if (clip > 50) { color = "#ef444480"; radius = 600; }
+                            else if (clip > 20) { color = "#f9731680"; radius = 500; }
+                            else if (lift > 3) { color = "#3b82f680"; radius = 500; }
+                            return (
+                              <g key={`zone-${i}`}>
+                                <circle cx={z.x} cy={z.y} r={radius} fill={color} stroke="none" />
+                                {(clip > 10 || lift > 2) && (
+                                  <text x={z.x} y={z.y} textAnchor="middle" dominantBaseline="central"
+                                    fill="white" fontSize={200} fontWeight="bold" opacity={0.7}>
+                                    {clip > 10 ? `${clip.toFixed(0)}%` : `L&C`}
+                                  </text>
+                                )}
+                              </g>
+                            );
+                          });
+                        })()}
 
                         {/* Driver dots — use transform for smooth CSS transitions */}
                         {Object.entries(liveData.positions).map(([num, pos]) => {
@@ -486,41 +627,48 @@ export default function LivePitWall() {
                           </div>
                         )}
 
-                        {/* Est. ERS Deploy + Analysis Flags row */}
-                        <div className="flex flex-wrap items-start gap-3">
-                          {/* Est ERS Usage */}
+                        {/* Battery + Analysis Flags row */}
+                        <div className="flex items-start gap-4">
+                          {/* Battery gauge */}
                           {detail?.estErsUsage != null && (
-                            <div className="bg-white/[0.03] rounded-lg p-3 border border-white/5 min-w-[180px]">
-                              <div className="flex items-center gap-1.5 mb-1">
-                                <Battery size={12} className="text-emerald-400" />
-                                <span className="text-[9px] text-f1-muted uppercase tracking-wider">Est. ERS Deploy</span>
-                                <span className="text-[8px] text-zinc-600 ml-auto" title="Estimated from public telemetry — not actual battery data">est.</span>
+                            <div className="relative cursor-pointer" onClick={() => setOpenDefinition(openDefinition === `ERS_${driverNum}` ? null : `ERS_${driverNum}`)}>
+                              <BatteryGauge value={detail.estErsUsage} />
+                              <div className="absolute -top-1 -right-1">
+                                <Info size={10} className="text-zinc-600 hover:text-zinc-300 transition" />
                               </div>
-                              <div className="flex items-center gap-2">
-                                <div className="flex-1 h-1.5 bg-white/5 rounded-full overflow-hidden">
-                                  <div className="h-full rounded-full transition-all duration-500" style={{
-                                    width: `${Math.min(detail.estErsUsage * 100, 100)}%`,
-                                    background: detail.estErsUsage > 0.7 ? "#4ade80" : detail.estErsUsage > 0.4 ? "#FF8000" : "#ef4444",
-                                  }} />
-                                </div>
-                                <span className="font-mono text-sm text-white font-bold">{(detail.estErsUsage * 100).toFixed(0)}%</span>
-                              </div>
+                              <AnimatePresence>
+                                {openDefinition === `ERS_${driverNum}` && (
+                                  <GlassDefinition type="ERS_DEPLOY" onClose={() => setOpenDefinition(null)} />
+                                )}
+                              </AnimatePresence>
                             </div>
                           )}
 
                           {/* Analysis flags */}
-                          <div className="flex-1">
+                          <div className="flex-1 relative">
                             <span className="text-[9px] text-f1-muted uppercase tracking-wider">Analysis Flags</span>
                             <div className="flex flex-wrap gap-1.5 mt-1">
                               {detail?.patterns?.length > 0 ? (
                                 detail.patterns.map((p, i) => {
                                   const cfg = FLAG_CONFIG[p.type] || FLAG_CONFIG.CLIPPING;
                                   const FlagIcon = cfg.icon;
+                                  const defKey = `${p.type}_${driverNum}`;
                                   return (
-                                    <div key={i} className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 ${cfg.bg} ${cfg.border}`}>
-                                      <FlagIcon size={12} style={{ color: cfg.color }} />
-                                      <span className={`text-[10px] font-bold ${cfg.text}`}>{cfg.label}</span>
-                                      <span className="text-[9px] text-f1-muted">{(p.confidence * 100).toFixed(0)}%</span>
+                                    <div key={i} className="relative">
+                                      <div
+                                        onClick={() => setOpenDefinition(openDefinition === defKey ? null : defKey)}
+                                        className={`inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 cursor-pointer hover:brightness-125 transition ${cfg.bg} ${cfg.border}`}
+                                      >
+                                        <FlagIcon size={12} style={{ color: cfg.color }} />
+                                        <span className={`text-[10px] font-bold ${cfg.text}`}>{cfg.label}</span>
+                                        <span className="text-[9px] text-f1-muted">{(p.confidence * 100).toFixed(0)}%</span>
+                                        <Info size={9} className="text-zinc-600 ml-0.5" />
+                                      </div>
+                                      <AnimatePresence>
+                                        {openDefinition === defKey && (
+                                          <GlassDefinition type={p.type} onClose={() => setOpenDefinition(null)} />
+                                        )}
+                                      </AnimatePresence>
                                     </div>
                                   );
                                 })
