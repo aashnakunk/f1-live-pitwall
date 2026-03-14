@@ -1,10 +1,11 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { motion } from "framer-motion";
-import { Map, ChevronLeft, ChevronRight, Gauge, Zap as ZapIcon, Timer } from "lucide-react";
+import { Map, ChevronLeft, ChevronRight, Gauge, Zap as ZapIcon, Timer, AlertTriangle, Battery, Wind, Play, Pause, RotateCcw, FastForward } from "lucide-react";
 import Plot from "react-plotly.js";
 import GlassCard from "../components/GlassCard";
 import PageHeader from "../components/PageHeader";
 import LoadingSpinner from "../components/LoadingSpinner";
+import CircuitSVG from "../components/CircuitSVG";
 import { useApi } from "../hooks/useApi";
 
 const plotLayout = {
@@ -23,6 +24,10 @@ const COLOR_MODES = [
   { key: "brake", label: "Brake", unit: "%", colorscale: "Reds" },
   { key: "gear", label: "Gear", unit: "", colorscale: "Viridis" },
   { key: "zones", label: "Zones", unit: "", colorscale: null },
+  { key: "clipping", label: "Clipping", unit: "", colorscale: null },
+  { key: "ersDeployment", label: "ERS Deploy", unit: "", colorscale: null },
+  { key: "liftCoast", label: "Lift & Coast", unit: "", colorscale: null },
+  { key: "drs", label: "DRS", unit: "", colorscale: null },
 ];
 
 const ZONE_COLORS = {
@@ -44,6 +49,54 @@ export default function CircuitLab() {
   const [lapMode, setLapMode] = useState("fastest");
   const [singleLap, setSingleLap] = useState(null);
   const [lapRange, setLapRange] = useState([1, 5]);
+
+  // Replay state
+  const [replayPlaying, setReplayPlaying] = useState(false);
+  const [replaySpeed, setReplaySpeed] = useState(1);
+  const [replayIndex, setReplayIndex] = useState(0);
+  const animRef = useRef(null);
+  const lastFrameRef = useRef(0);
+  const indexRef = useRef(0);
+
+  // Replay animation loop
+  useEffect(() => {
+    if (colorMode !== "replay" || !replayPlaying || !circuitData?.x?.length) {
+      if (animRef.current) cancelAnimationFrame(animRef.current);
+      return;
+    }
+    const totalSamples = circuitData.x.length;
+    // ~90s for a full lap at 1x speed
+    const msPerSample = (90 * 1000) / totalSamples;
+
+    const animate = (timestamp) => {
+      if (!lastFrameRef.current) lastFrameRef.current = timestamp;
+      const elapsed = timestamp - lastFrameRef.current;
+      lastFrameRef.current = timestamp;
+
+      const advance = (elapsed / msPerSample) * replaySpeed;
+      indexRef.current = Math.min(indexRef.current + advance, totalSamples - 1);
+
+      const idx = Math.round(indexRef.current);
+      setReplayIndex(idx);
+
+      if (indexRef.current >= totalSamples - 1) {
+        setReplayPlaying(false);
+        return;
+      }
+      animRef.current = requestAnimationFrame(animate);
+    };
+
+    lastFrameRef.current = 0;
+    animRef.current = requestAnimationFrame(animate);
+    return () => { if (animRef.current) cancelAnimationFrame(animRef.current); };
+  }, [colorMode, replayPlaying, replaySpeed, circuitData]);
+
+  // Reset replay when driver/lap changes
+  useEffect(() => {
+    setReplayPlaying(false);
+    setReplayIndex(0);
+    indexRef.current = 0;
+  }, [selectedDriver, lapMode, singleLap, lapRange[0], lapRange[1]]);
 
   useEffect(() => {
     async function init() {
@@ -115,6 +168,58 @@ export default function CircuitLab() {
       };
     }
 
+    if (colorMode === "clipping" && circuitData.clipping) {
+      const colors = circuitData.clipping.map((c) => c ? "#ef4444" : "#22c55e40");
+      return {
+        type: "scatter", mode: "markers",
+        x: circuitData.x, y: circuitData.y,
+        marker: { color: colors, size: circuitData.clipping.map(c => c ? 7 : 4), opacity: circuitData.clipping.map(c => c ? 1 : 0.4) },
+        hovertemplate: circuitData.clipping.map(
+          (c, i) => `${c ? "CLIPPING" : "Normal"}<br>Speed: ${circuitData.speed[i]?.toFixed(0)} km/h<br>Throttle: ${circuitData.throttle[i]?.toFixed(0)}%<extra></extra>`
+        ),
+        showlegend: false,
+      };
+    }
+
+    if (colorMode === "ersDeployment" && circuitData.ersDeployment) {
+      const colors = circuitData.ersDeployment.map((e) => e ? "#4ade80" : "#ffffff10");
+      return {
+        type: "scatter", mode: "markers",
+        x: circuitData.x, y: circuitData.y,
+        marker: { color: colors, size: circuitData.ersDeployment.map(e => e ? 6 : 3.5), opacity: circuitData.ersDeployment.map(e => e ? 1 : 0.3) },
+        hovertemplate: circuitData.ersDeployment.map(
+          (e, i) => `${e ? "ERS DEPLOYING" : "No deploy"}<br>Speed: ${circuitData.speed[i]?.toFixed(0)} km/h<br>Accel: ${i > 0 ? (circuitData.speed[i] - circuitData.speed[i-1]).toFixed(1) : 0} km/h<extra></extra>`
+        ),
+        showlegend: false,
+      };
+    }
+
+    if (colorMode === "liftCoast" && circuitData.liftCoast) {
+      const colors = circuitData.liftCoast.map((l) => l ? "#3b82f6" : "#ffffff10");
+      return {
+        type: "scatter", mode: "markers",
+        x: circuitData.x, y: circuitData.y,
+        marker: { color: colors, size: circuitData.liftCoast.map(l => l ? 7 : 3.5), opacity: circuitData.liftCoast.map(l => l ? 1 : 0.3) },
+        hovertemplate: circuitData.liftCoast.map(
+          (l, i) => `${l ? "LIFT & COAST" : "Normal"}<br>Speed: ${circuitData.speed[i]?.toFixed(0)} km/h<br>Throttle: ${circuitData.throttle[i]?.toFixed(0)}%<extra></extra>`
+        ),
+        showlegend: false,
+      };
+    }
+
+    if (colorMode === "drs" && circuitData.drs) {
+      const colors = circuitData.drs.map((d) => d ? "#a855f7" : "#ffffff10");
+      return {
+        type: "scatter", mode: "markers",
+        x: circuitData.x, y: circuitData.y,
+        marker: { color: colors, size: circuitData.drs.map(d => d ? 7 : 3.5), opacity: circuitData.drs.map(d => d ? 1 : 0.3) },
+        hovertemplate: circuitData.drs.map(
+          (d, i) => `${d ? "DRS OPEN" : "DRS Closed"}<br>Speed: ${circuitData.speed[i]?.toFixed(0)} km/h<br>Gear: ${circuitData.gear?.[i] ?? "?"}<extra></extra>`
+        ),
+        showlegend: false,
+      };
+    }
+
     const values = colorMode === "gear" ? circuitData.gear : circuitData[colorMode];
     if (!values) return null;
 
@@ -155,6 +260,8 @@ export default function CircuitLab() {
   const topSpeed = circuitData?.speed ? Math.round(Math.max(...circuitData.speed)) : null;
   const avgSpeed = circuitData?.speed ? Math.round(circuitData.speed.reduce((a, b) => a + b, 0) / circuitData.speed.length) : null;
   const nCorners = circuitData?.corners?.length || 0;
+  const overallClipping = circuitData?.overallClipping;
+  const overallErs = circuitData?.overallErs;
 
   return (
     <div className="space-y-6">
@@ -231,6 +338,22 @@ export default function CircuitLab() {
                   <span className="text-xs font-bold text-white">{nCorners} turns</span>
                 </div>
               )}
+              {overallClipping != null && overallClipping > 0 && (
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md border border-red-500/30">
+                  <AlertTriangle className="w-3 h-3 text-red-400" />
+                  <span className="text-xs text-zinc-400">Clipping</span>
+                  <span className={`text-xs font-bold ${overallClipping > 15 ? "text-red-400" : overallClipping > 5 ? "text-orange-400" : "text-green-400"}`}>
+                    {overallClipping}%
+                  </span>
+                </div>
+              )}
+              {overallErs != null && (
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-black/60 backdrop-blur-md border border-green-500/30">
+                  <Battery className="w-3 h-3 text-green-400" />
+                  <span className="text-xs text-zinc-400">ERS Deploy</span>
+                  <span className="text-xs font-bold text-green-400">{Math.round(overallErs * 100)}%</span>
+                </div>
+              )}
             </div>
           )}
 
@@ -246,7 +369,116 @@ export default function CircuitLab() {
             </div>
           )}
 
-          {trackTrace ? (
+          {colorMode === "replay" && circuitData?.x ? (
+            <div className="p-2">
+              <CircuitSVG
+                outline={{ x: circuitData.x, y: circuitData.y }}
+                drivers={[{
+                  id: selectedDriver,
+                  x: circuitData.x[replayIndex] || 0,
+                  y: circuitData.y[replayIndex] || 0,
+                  color: circuitData.color || "#E10600",
+                  label: selectedDriver,
+                }]}
+                highlightDriver={selectedDriver}
+                showStartFinish
+                corners={(circuitData.corners || []).map(c => ({ number: `T${c.number}`, x: c.x, y: c.y }))}
+                trackSegments={(() => {
+                  // Color the trail behind the dot based on speed
+                  const segs = [];
+                  const limit = Math.min(replayIndex, circuitData.x.length - 1);
+                  if (limit > 1) {
+                    // Trailing path colored by clipping/ERS
+                    for (let i = 0; i < limit; i++) {
+                      const isClip = circuitData.clipping?.[i];
+                      const isErs = circuitData.ersDeployment?.[i];
+                      const isLift = circuitData.liftCoast?.[i];
+                      const isDrs = circuitData.drs?.[i];
+                      let color = "#ffffff15";
+                      if (isClip) color = "#ef444480";
+                      else if (isDrs) color = "#a855f780";
+                      else if (isErs) color = "#4ade8060";
+                      else if (isLift) color = "#3b82f660";
+                      // Group adjacent same-color points
+                      if (segs.length > 0 && segs[segs.length - 1].color === color) {
+                        segs[segs.length - 1].endIdx = i;
+                      } else {
+                        segs.push({ startIdx: i, endIdx: i, color });
+                      }
+                    }
+                  }
+                  return segs;
+                })()}
+                height={520}
+              />
+
+              {/* Live telemetry gauges */}
+              <div className="flex items-center justify-center gap-4 py-3 px-4">
+                {/* Speed */}
+                <div className="text-center">
+                  <p className="text-2xl font-bold font-mono text-white">
+                    {Math.round(circuitData.speed?.[replayIndex] || 0)}
+                  </p>
+                  <p className="text-[9px] text-zinc-500 uppercase">km/h</p>
+                </div>
+
+                {/* Throttle gauge */}
+                <div className="flex flex-col items-center gap-1">
+                  <div className="w-24 h-2 rounded-full bg-white/10 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-green-500 transition-all duration-100"
+                      style={{ width: `${circuitData.throttle?.[replayIndex] || 0}%` }}
+                    />
+                  </div>
+                  <span className="text-[9px] text-zinc-500">THR {Math.round(circuitData.throttle?.[replayIndex] || 0)}%</span>
+                </div>
+
+                {/* Brake gauge */}
+                <div className="flex flex-col items-center gap-1">
+                  <div className="w-24 h-2 rounded-full bg-white/10 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-red-500 transition-all duration-100"
+                      style={{ width: `${circuitData.brake?.[replayIndex] || 0}%` }}
+                    />
+                  </div>
+                  <span className="text-[9px] text-zinc-500">BRK {Math.round(circuitData.brake?.[replayIndex] || 0)}%</span>
+                </div>
+
+                {/* Gear */}
+                <div className="text-center">
+                  <p className="text-2xl font-bold font-mono" style={{ color: circuitData.color || "#E10600" }}>
+                    {circuitData.gear?.[replayIndex] ?? "—"}
+                  </p>
+                  <p className="text-[9px] text-zinc-500 uppercase">Gear</p>
+                </div>
+
+                {/* Analysis flags */}
+                <div className="flex flex-col items-center gap-0.5">
+                  {circuitData.clipping?.[replayIndex] ? (
+                    <span className="text-[9px] font-bold text-red-400 bg-red-400/10 px-2 py-0.5 rounded">CLIPPING</span>
+                  ) : circuitData.drs?.[replayIndex] ? (
+                    <span className="text-[9px] font-bold text-purple-400 bg-purple-400/10 px-2 py-0.5 rounded">DRS OPEN</span>
+                  ) : circuitData.ersDeployment?.[replayIndex] ? (
+                    <span className="text-[9px] font-bold text-green-400 bg-green-400/10 px-2 py-0.5 rounded">ERS DEPLOY</span>
+                  ) : circuitData.liftCoast?.[replayIndex] ? (
+                    <span className="text-[9px] font-bold text-blue-400 bg-blue-400/10 px-2 py-0.5 rounded">LIFT & COAST</span>
+                  ) : (
+                    <span className="text-[9px] text-zinc-600 px-2 py-0.5">CLEAN</span>
+                  )}
+                </div>
+
+                {/* Distance progress */}
+                <div className="text-center">
+                  <p className="text-xs font-mono text-zinc-400">
+                    {Math.round(circuitData.distance?.[replayIndex] || 0)}m
+                  </p>
+                  <p className="text-[9px] text-zinc-600">
+                    / {Math.round(circuitData.distance?.[circuitData.distance.length - 1] || 0)}m
+                  </p>
+                </div>
+              </div>
+            </div>
+          ) : trackTrace ? (
             <Plot
               data={[trackTrace]}
               layout={{
@@ -307,7 +539,7 @@ export default function CircuitLab() {
           <GlassCard className="p-4" delay={0.12}>
             <h4 className="text-[10px] font-semibold text-zinc-500 uppercase tracking-widest mb-2">Overlay</h4>
             <div className="grid grid-cols-2 gap-1.5">
-              {COLOR_MODES.map((m) => (
+              {COLOR_MODES.filter((m) => m.key !== "drs" || circuitData?.drsAvailable).map((m) => (
                 <button
                   key={m.key}
                   onClick={() => setColorMode(m.key)}
@@ -321,6 +553,18 @@ export default function CircuitLab() {
                 </button>
               ))}
             </div>
+            {/* Replay button — standalone, prominent */}
+            <button
+              onClick={() => setColorMode(colorMode === "replay" ? "speed" : "replay")}
+              className={`w-full mt-2 flex items-center justify-center gap-2 py-2 rounded-lg text-xs font-bold transition-all
+                ${colorMode === "replay"
+                  ? "bg-f1-red text-white shadow-lg shadow-red-500/20"
+                  : "bg-white/5 text-zinc-400 hover:bg-white/10 hover:text-white border border-dashed border-white/10"
+                }`}
+            >
+              <Play className="w-3.5 h-3.5" />
+              {colorMode === "replay" ? "Exit Replay" : "Lap Replay"}
+            </button>
             {colorMode === "zones" && (
               <div className="flex flex-wrap gap-x-3 gap-y-1 mt-3">
                 {Object.entries(ZONE_COLORS).map(([zone, color]) => (
@@ -329,6 +573,134 @@ export default function CircuitLab() {
                     <span className="text-[9px] text-zinc-500">{zone}</span>
                   </div>
                 ))}
+              </div>
+            )}
+            {colorMode === "clipping" && (
+              <div className="mt-3 space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-red-500" />
+                  <span className="text-[9px] text-zinc-400">Clipping zone</span>
+                </div>
+                <p className="text-[9px] text-zinc-600">Throttle 100% + no speed gain = power limited</p>
+                {overallClipping != null && <p className="text-[10px] text-red-400 font-semibold">Overall: {overallClipping}%</p>}
+              </div>
+            )}
+            {colorMode === "ersDeployment" && (
+              <div className="mt-3 space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-green-400" />
+                  <span className="text-[9px] text-zinc-400">ERS deploying</span>
+                </div>
+                <p className="text-[9px] text-zinc-600">Full throttle + accelerating = battery boost</p>
+                {overallErs != null && <p className="text-[10px] text-green-400 font-semibold">Deploy ratio: {Math.round(overallErs * 100)}%</p>}
+              </div>
+            )}
+            {colorMode === "liftCoast" && (
+              <div className="mt-3 space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full bg-blue-500" />
+                  <span className="text-[9px] text-zinc-400">Lift & coast</span>
+                </div>
+                <p className="text-[9px] text-zinc-600">Off throttle + off brake at speed = fuel/energy saving</p>
+              </div>
+            )}
+            {colorMode === "drs" && (
+              <div className="mt-3 space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: "#a855f7" }} />
+                  <span className="text-[9px] text-zinc-400">DRS open</span>
+                </div>
+                <p className="text-[9px] text-zinc-600">Rear wing flap open — reduced drag on straights</p>
+                {!circuitData?.drsAvailable && (
+                  <p className="text-[10px] text-amber-400">No DRS data for this session (2026+ uses X/Z mode instead)</p>
+                )}
+                {circuitData?.drs && (
+                  <p className="text-[10px] text-purple-400 font-semibold">
+                    DRS usage: {Math.round((circuitData.drs.filter(d => d).length / circuitData.drs.length) * 100)}% of lap
+                  </p>
+                )}
+              </div>
+            )}
+            {colorMode === "replay" && (
+              <div className="mt-3 space-y-3">
+                {/* Play / Pause / Reset */}
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => {
+                      if (replayIndex >= (circuitData?.x?.length || 1) - 1) {
+                        indexRef.current = 0;
+                        setReplayIndex(0);
+                      }
+                      setReplayPlaying(!replayPlaying);
+                    }}
+                    className="w-8 h-8 rounded-lg bg-f1-red flex items-center justify-center hover:bg-f1-red/80 transition-colors"
+                  >
+                    {replayPlaying
+                      ? <Pause className="w-4 h-4 text-white" />
+                      : <Play className="w-4 h-4 text-white ml-0.5" />}
+                  </button>
+                  <button
+                    onClick={() => { setReplayPlaying(false); indexRef.current = 0; setReplayIndex(0); }}
+                    className="w-8 h-8 rounded-lg bg-white/5 flex items-center justify-center hover:bg-white/10 border border-white/10"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5 text-zinc-400" />
+                  </button>
+                </div>
+
+                {/* Speed buttons */}
+                <div className="flex gap-1">
+                  {[0.5, 1, 2, 4].map((s) => (
+                    <button
+                      key={s}
+                      onClick={() => setReplaySpeed(s)}
+                      className={`flex-1 py-1 rounded text-[10px] font-bold transition-all
+                        ${replaySpeed === s ? "bg-f1-red text-white" : "bg-white/5 text-zinc-500 hover:bg-white/10"}`}
+                    >
+                      {s}x
+                    </button>
+                  ))}
+                </div>
+
+                {/* Scrubber */}
+                <input
+                  type="range"
+                  min={0}
+                  max={(circuitData?.x?.length || 1) - 1}
+                  value={replayIndex}
+                  onChange={(e) => {
+                    const v = parseInt(e.target.value, 10);
+                    indexRef.current = v;
+                    setReplayIndex(v);
+                    setReplayPlaying(false);
+                  }}
+                  className="w-full h-1.5 rounded-full appearance-none cursor-pointer bg-white/10 accent-f1-red
+                    [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:w-3
+                    [&::-webkit-slider-thumb]:h-3 [&::-webkit-slider-thumb]:rounded-full
+                    [&::-webkit-slider-thumb]:bg-f1-red [&::-webkit-slider-thumb]:cursor-pointer"
+                />
+
+                {/* Legend */}
+                <div className="space-y-1 pt-1 border-t border-white/[0.06]">
+                  <p className="text-[9px] text-zinc-500 font-semibold uppercase">Trail colors</p>
+                  <div className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-red-500" />
+                    <span className="text-[8px] text-zinc-500">Clipping</span>
+                  </div>
+                  {circuitData.drsAvailable && (
+                    <div className="flex items-center gap-1">
+                      <span className="w-2 h-2 rounded-full" style={{ backgroundColor: "#a855f7" }} />
+                      <span className="text-[8px] text-zinc-500">DRS Open</span>
+                    </div>
+                  )}
+                  <div className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-green-400" />
+                    <span className="text-[8px] text-zinc-500">ERS Deploy</span>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    <span className="w-2 h-2 rounded-full bg-blue-500" />
+                    <span className="text-[8px] text-zinc-500">Lift & Coast</span>
+                  </div>
+                </div>
               </div>
             )}
           </GlassCard>
@@ -492,6 +864,7 @@ export default function CircuitLab() {
             {circuitData.corners.map((c) => {
               const character = c.speed < 100 ? "Slow" : c.speed < 150 ? "Medium" : c.speed < 200 ? "Fast" : "Flat";
               const charColor = c.speed < 100 ? "#ef4444" : c.speed < 150 ? "#f97316" : c.speed < 200 ? "#fbbf24" : "#22c55e";
+              const ca = (circuitData.cornerAnalysis || []).find((a) => a.corner === c.number);
               return (
                 <motion.div
                   key={c.number}
@@ -515,6 +888,34 @@ export default function CircuitLab() {
                     <span className="text-[9px] text-zinc-500">G{c.gear ?? "?"}</span>
                     <span className="text-[9px] text-zinc-600">{Math.round(c.distance)}m</span>
                   </div>
+                  {ca && (
+                    <div className="mt-2 pt-2 border-t border-white/[0.06] space-y-1">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[8px] text-zinc-500">Entry</span>
+                        <span className="text-[9px] text-zinc-300 font-mono">{Math.round(ca.entrySpeed)}</span>
+                        <span className="text-[8px] text-zinc-500">Exit</span>
+                        <span className="text-[9px] text-zinc-300 font-mono">{Math.round(ca.exitSpeed)}</span>
+                      </div>
+                      {ca.clippingPct > 0 && (
+                        <div className="flex items-center gap-1">
+                          <AlertTriangle className="w-2.5 h-2.5 text-red-400" />
+                          <span className="text-[8px] text-red-400 font-semibold">Clip {ca.clippingPct}%</span>
+                        </div>
+                      )}
+                      {ca.ersDeployPct > 0 && (
+                        <div className="flex items-center gap-1">
+                          <ZapIcon className="w-2.5 h-2.5 text-green-400" />
+                          <span className="text-[8px] text-green-400 font-semibold">ERS {ca.ersDeployPct}%</span>
+                        </div>
+                      )}
+                      {ca.liftCoastSamples > 0 && (
+                        <div className="flex items-center gap-1">
+                          <Wind className="w-2.5 h-2.5 text-blue-400" />
+                          <span className="text-[8px] text-blue-400 font-semibold">L&C ×{ca.liftCoastSamples}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </motion.div>
               );
             })}
