@@ -1,0 +1,47 @@
+import { useState, useEffect } from "react";
+import { useApi } from "../hooks/useApi";
+import SessionLoader from "./SessionLoader";
+import LoadingSpinner from "./LoadingSpinner";
+
+export default function SessionGate({ children }) {
+  const { call } = useApi();
+  const [status, setStatus] = useState(null);
+  const [checking, setChecking] = useState(true);
+
+  const checkSession = async () => {
+    setChecking(true);
+    const data = await call("/api/session/status");
+    setStatus(data);
+    setChecking(false);
+  };
+
+  useEffect(() => {
+    checkSession();
+  }, []);
+
+  if (checking) return <LoadingSpinner text="Checking session..." />;
+
+  if (!status?.loaded) {
+    return (
+      <div className="flex flex-col items-center justify-center py-16 gap-6">
+        <div className="text-center mb-2">
+          <h2 className="text-xl font-bold text-white mb-1">No Session Loaded</h2>
+          <p className="text-f1-muted text-sm">Load a race session to view this page</p>
+        </div>
+        <SessionLoader onLoaded={() => checkSession()} />
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="mb-6 flex items-center gap-2">
+        <div className="w-2 h-2 rounded-full bg-emerald-400" />
+        <span className="text-xs text-f1-muted">
+          {status.event} {status.year} — {status.session}
+        </span>
+      </div>
+      {children}
+    </>
+  );
+}
