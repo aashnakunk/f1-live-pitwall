@@ -9,7 +9,7 @@ import {
 import GlassCard from "../components/GlassCard";
 import PageHeader from "../components/PageHeader";
 import LoadingSpinner from "../components/LoadingSpinner";
-import { useApi } from "../hooks/useApi";
+import SpeedometerGauge from "../components/SpeedometerGauge";
 
 const miniPlotLayout = {
   template: "plotly_dark",
@@ -139,23 +139,40 @@ function BatteryGauge({ value }) {
   );
 }
 
+// Direct fetch helper — avoids shared useApi state that causes
+// re-render storms when many parallel polls run every second
+async function apiFetch(url, options = {}) {
+  const res = await fetch(url, {
+    headers: { "Content-Type": "application/json" },
+    ...options,
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
 export default function LivePitWall() {
-  const { call, loading } = useApi();
   const [status, setStatus] = useState(null);
   const [liveData, setLiveData] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [autoRefresh, setAutoRefresh] = useState(false);
   const [selectedDrivers, setSelectedDrivers] = useState(new Set());
   const [driverDetails, setDriverDetails] = useState({});
   const [circuitOutline, setCircuitOutline] = useState([]);
-  const [openDefinition, setOpenDefinition] = useState(null); // e.g., "CLIPPING" or "ERS_DEPLOY"
-  const [zoneData, setZoneData] = useState({}); // per driver zone analysis
+  const [openDefinition, setOpenDefinition] = useState(null);
+  const [zoneData, setZoneData] = useState({});
   const intervalRef = useRef(null);
+  const fetchingRef = useRef(false); // prevent stacking when backend is slow
 
   useEffect(() => { fetchStatus(); fetchData(); fetchCircuit(); }, []);
 
   useEffect(() => {
     if (autoRefresh) {
-      intervalRef.current = setInterval(() => { fetchData(); fetchStatus(); }, 1000);
+      intervalRef.current = setInterval(() => {
+        // Skip if previous fetch hasn't finished (prevents request stacking)
+        if (fetchingRef.current) return;
+        fetchData();
+        fetchStatus();
+      }, 1000);
     } else if (intervalRef.current) {
       clearInterval(intervalRef.current);
     }
@@ -166,26 +183,55 @@ export default function LivePitWall() {
     if (!autoRefresh || selectedDrivers.size === 0) return;
     const id = setInterval(() => {
       selectedDrivers.forEach((num) => fetchDriverDetail(num));
-    }, 1000);
+    }, 2000); // slower cadence for detail fetches
     return () => clearInterval(id);
   }, [autoRefresh, selectedDrivers]);
 
-  const fetchStatus = async () => { const d = await call("/api/live/status"); if (d) setStatus(d); };
-  const fetchData = async () => { const d = await call("/api/live/data"); if (d) setLiveData(d); };
-  const fetchCircuit = async () => {
-    const d = await call("/api/live/circuit");
-    if (d?.outline?.length > 0) setCircuitOutline(d.outline);
+  const fetchStatus = async () => {
+    try {
+      const d = await apiFetch("/api/live/status");
+      if (d) setStatus(d);
+    } catch (e) { /* ignore */ }
   };
-  const startRecording = async () => { await call("/api/live/start", { method: "POST" }); setAutoRefresh(true); fetchStatus(); };
-  const stopRecording = async () => { await call("/api/live/stop", { method: "POST" }); setAutoRefresh(false); fetchStatus(); };
-  const clearData = async () => { await call("/api/live/clear", { method: "POST" }); setLiveData(null); fetchStatus(); };
+  const fetchData = async () => {
+    fetchingRef.current = true;
+    try {
+      const d = await apiFetch("/api/live/data");
+      if (d) setLiveData(d);
+    } catch (e) { /* ignore */ }
+    finally { fetchingRef.current = false; }
+  };
+  const fetchCircuit = async () => {
+    try {
+      const d = await apiFetch("/api/live/circuit");
+      if (d?.outline?.length > 0) setCircuitOutline(d.outline);
+    } catch (e) { /* ignore */ }
+  };
+  const startRecording = async () => {
+    await apiFetch("/api/live/start", { method: "POST" });
+    setAutoRefresh(true);
+    fetchStatus();
+  };
+  const stopRecording = async () => {
+    await apiFetch("/api/live/stop", { method: "POST" });
+    setAutoRefresh(false);
+    fetchStatus();
+  };
+  const clearData = async () => {
+    await apiFetch("/api/live/clear", { method: "POST" });
+    setLiveData(null);
+    fetchStatus();
+  };
 
   const fetchDriverDetail = async (driverNumber) => {
-    const data = await call(`/api/live/driver/${driverNumber}`);
-    if (data) setDriverDetails((prev) => ({ ...prev, [driverNumber]: data }));
-    // Also fetch zone analysis for heatmap
-    const zones = await call(`/api/live/driver/${driverNumber}/zones`);
-    if (zones) setZoneData((prev) => ({ ...prev, [driverNumber]: zones }));
+    try {
+      const [data, zones] = await Promise.all([
+        apiFetch(`/api/live/driver/${driverNumber}`),
+        apiFetch(`/api/live/driver/${driverNumber}/zones`),
+      ]);
+      if (data) setDriverDetails((prev) => ({ ...prev, [driverNumber]: data }));
+      if (zones) setZoneData((prev) => ({ ...prev, [driverNumber]: zones }));
+    } catch (e) { /* ignore */ }
   };
 
   const toggleDriver = (driverNumber) => {
@@ -257,9 +303,9 @@ export default function LivePitWall() {
                 <Square size={14} /> Stop
               </button>
             )}
-            <button onClick={() => { fetchData(); fetchStatus(); }}
+            <button onClick={() => { setRefreshing(true); Promise.all([fetchData(), fetchStatus()]).finally(() => setRefreshing(false)); }}
               className="flex items-center gap-2 bg-white/5 hover:bg-white/10 text-zinc-300 text-sm px-3 py-2 rounded-lg transition border border-white/10">
-              <RefreshCw size={14} className={loading ? "animate-spin" : ""} /> Refresh
+              <RefreshCw size={14} className={refreshing ? "animate-spin" : ""} /> Refresh
             </button>
             <button onClick={() => setAutoRefresh(!autoRefresh)}
               className={`flex items-center gap-2 text-sm px-3 py-2 rounded-lg transition border ${
@@ -286,14 +332,15 @@ export default function LivePitWall() {
         <>
           {/* ── Overview row: Track Map + Gap Evolution + Tyre Strategy ── */}
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-            {/* Track Map */}
+            {/* Track Map — Premium thick F1-style */}
             {liveData.positions && Object.keys(liveData.positions).length > 0 && (
               <GlassCard className="p-4" delay={0.12}>
-                <h3 className="text-white font-semibold text-sm mb-2">Track Map</h3>
-                <div className="relative w-full" style={{ paddingBottom: "75%" }}>
+                <div className="flex items-center justify-between mb-3">
+                  <h3 className="text-white font-semibold text-sm uppercase tracking-widest">Live Track</h3>
+                  <span className="text-[9px] text-green-400 font-mono animate-pulse">LIVE</span>
+                </div>
+                <div className="relative w-full" style={{ paddingBottom: "80%" }}>
                   {(() => {
-                    // Compute viewBox — prefer circuit outline, fall back to positions
-                    // Check if positions are spread out or all stale at one point
                     const posPts = Object.values(liveData.positions);
                     const posSpread = posPts.length > 1
                       ? Math.max(...posPts.map(p => p.x)) - Math.min(...posPts.map(p => p.x))
@@ -304,22 +351,21 @@ export default function LivePitWall() {
                     if (!allPts.length && circuitOutline.length <= 10) return null;
                     const usePts = allPts.length > 0 ? allPts : circuitOutline;
                     const xs = usePts.map(p => p.x), ys = usePts.map(p => p.y);
-                    const pad = circuitOutline.length > 10 ? 800 : 2000;
+                    const pad = circuitOutline.length > 10 ? 1200 : 2500;
                     const vb = `${Math.min(...xs)-pad} ${Math.min(...ys)-pad} ${Math.max(...xs)-Math.min(...xs)+pad*2} ${Math.max(...ys)-Math.min(...ys)+pad*2}`;
+                    const vbW = Math.max(...xs) - Math.min(...xs) + pad * 2;
 
-                    // Build smooth circuit path using Catmull-Rom → cubic bezier
+                    // Build smooth circuit path using Catmull-Rom
                     let circuitPath = null;
                     if (circuitOutline.length > 10) {
                       const pts = circuitOutline;
                       const n = pts.length;
-                      // Catmull-Rom to cubic bezier conversion
                       let d = `M ${pts[0].x} ${pts[0].y}`;
                       for (let i = 0; i < n - 1; i++) {
                         const p0 = pts[(i - 1 + n) % n];
                         const p1 = pts[i];
                         const p2 = pts[(i + 1) % n];
                         const p3 = pts[(i + 2) % n];
-                        // Control points (tension = 0.5 for smooth curves)
                         const cp1x = p1.x + (p2.x - p0.x) / 6;
                         const cp1y = p1.y + (p2.y - p0.y) / 6;
                         const cp2x = p2.x - (p3.x - p1.x) / 6;
@@ -329,19 +375,44 @@ export default function LivePitWall() {
                       circuitPath = d;
                     }
 
+                    const dotR = vbW * 0.016;
+                    const selDotR = vbW * 0.022;
+                    const fontSize = vbW * 0.014;
+
                     return (
                       <svg viewBox={vb} className="absolute inset-0 w-full h-full">
-                        {/* Circuit outline */}
+                        <defs>
+                          <filter id="liveTrackGlow" x="-50%" y="-50%" width="200%" height="200%">
+                            <feGaussianBlur in="SourceGraphic" stdDeviation={vbW * 0.004} />
+                          </filter>
+                        </defs>
+
+                        {/* Layer 1: Outer runoff glow */}
                         {circuitPath && (
-                          <path d={circuitPath} fill="none" stroke="rgba(255,255,255,0.08)"
-                            strokeWidth={200} strokeLinejoin="round" strokeLinecap="round" />
+                          <path d={circuitPath} fill="none" stroke="rgba(255,255,255,0.03)"
+                            strokeWidth={vbW * 0.05} strokeLinejoin="round" strokeLinecap="round" />
                         )}
+                        {/* Layer 2: Asphalt surface */}
                         {circuitPath && (
-                          <path d={circuitPath} fill="none" stroke="rgba(255,255,255,0.15)"
-                            strokeWidth={60} strokeLinejoin="round" strokeLinecap="round" />
+                          <path d={circuitPath} fill="none" stroke="#1a1a1a"
+                            strokeWidth={vbW * 0.035} strokeLinejoin="round" strokeLinecap="round" />
+                        )}
+                        {/* Layer 3: Track edge lines */}
+                        {circuitPath && (
+                          <>
+                            <path d={circuitPath} fill="none" stroke="rgba(255,255,255,0.12)"
+                              strokeWidth={vbW * 0.037} strokeLinejoin="round" strokeLinecap="round" />
+                            <path d={circuitPath} fill="none" stroke="#1a1a1a"
+                              strokeWidth={vbW * 0.032} strokeLinejoin="round" strokeLinecap="round" />
+                          </>
+                        )}
+                        {/* Layer 4: Center racing line */}
+                        {circuitPath && (
+                          <path d={circuitPath} fill="none" stroke="rgba(255,255,255,0.12)"
+                            strokeWidth={vbW * 0.006} strokeLinejoin="round" strokeLinecap="round" />
                         )}
 
-                        {/* Zone heatmap overlay — shows clipping/lift-coast for selected driver */}
+                        {/* Zone heatmap overlay */}
                         {(() => {
                           const selArr = [...selectedDrivers];
                           if (selArr.length === 0) return null;
@@ -350,18 +421,17 @@ export default function LivePitWall() {
                           return zd.zones.filter(z => z.samples > 0).map((z, i) => {
                             const clip = z.clippingPct || 0;
                             const lift = z.liftCoastSamples || 0;
-                            // Color: green=clean, orange=some clipping, red=heavy clipping, blue=lift-coast
-                            let color = "#4ade8040"; // clean
-                            let radius = 400;
-                            if (clip > 50) { color = "#ef444480"; radius = 600; }
-                            else if (clip > 20) { color = "#f9731680"; radius = 500; }
-                            else if (lift > 3) { color = "#3b82f680"; radius = 500; }
+                            let color = "#4ade8040";
+                            let radius = vbW * 0.02;
+                            if (clip > 50) { color = "#ef444480"; radius = vbW * 0.03; }
+                            else if (clip > 20) { color = "#f9731680"; radius = vbW * 0.025; }
+                            else if (lift > 3) { color = "#3b82f680"; radius = vbW * 0.025; }
                             return (
                               <g key={`zone-${i}`}>
                                 <circle cx={z.x} cy={z.y} r={radius} fill={color} stroke="none" />
                                 {(clip > 10 || lift > 2) && (
                                   <text x={z.x} y={z.y} textAnchor="middle" dominantBaseline="central"
-                                    fill="white" fontSize={200} fontWeight="bold" opacity={0.7}>
+                                    fill="white" fontSize={fontSize * 0.7} fontWeight="bold" opacity={0.7}>
                                     {clip > 10 ? `${clip.toFixed(0)}%` : `L&C`}
                                   </text>
                                 )}
@@ -370,7 +440,7 @@ export default function LivePitWall() {
                           });
                         })()}
 
-                        {/* Driver dots — use transform for smooth CSS transitions */}
+                        {/* Driver dots — premium with glow + label pills */}
                         {Object.entries(liveData.positions).map(([num, pos]) => {
                           const driver = liveData.timing.find(d => d.driverNumber === num);
                           const isInPit = driver?.InPit === true || driver?.InPit === "true";
@@ -379,23 +449,43 @@ export default function LivePitWall() {
                           const isSel = selectedDrivers.has(num);
                           const name = driver?.name || num;
                           const dimmed = isInPit || isRetired;
+                          const r = isSel && !dimmed ? selDotR : dotR;
                           return (
                             <g key={num} onClick={() => toggleDriver(num)}
                               style={{
                                 cursor: "pointer",
-                                opacity: dimmed ? 0.25 : 1,
+                                opacity: dimmed ? 0.2 : 1,
                                 transform: `translate(${pos.x}px, ${pos.y}px)`,
                                 transition: "transform 2.5s ease-in-out",
                               }}>
+                              {/* Glow ring for selected */}
                               {isSel && !dimmed && (
-                                <circle cx={0} cy={0} r={350} fill={`${color}33`} stroke={color} strokeWidth={50}>
-                                  <animate attributeName="r" values="300;400;300" dur="1.5s" repeatCount="indefinite" />
+                                <circle cx={0} cy={0} r={r * 2.5} fill="none" stroke={color} strokeWidth={r * 0.25} opacity={0.2}>
+                                  <animate attributeName="r" values={`${r*2};${r*2.8};${r*2}`} dur="1.5s" repeatCount="indefinite" />
+                                  <animate attributeName="opacity" values="0.3;0.1;0.3" dur="1.5s" repeatCount="indefinite" />
                                 </circle>
                               )}
-                              <circle cx={0} cy={0} r={isSel && !dimmed ? 200 : 130} fill={color}
-                                stroke={isSel ? "#fff" : `${color}88`} strokeWidth={isSel ? 50 : 25} />
-                              <text x={0} y={-250} textAnchor="middle" fill={isSel ? "#fff" : "#aaa"}
-                                fontSize={200} fontWeight={isSel ? "bold" : "normal"} fontFamily="monospace">
+                              {/* Glow blob */}
+                              <circle cx={0} cy={0} r={r * 1.5} fill={color} opacity={isSel ? 0.2 : 0.08}
+                                filter="url(#liveTrackGlow)" />
+                              {/* Main dot */}
+                              <circle cx={0} cy={0} r={r} fill={color}
+                                stroke="#fff" strokeWidth={r * 0.18} />
+                              {/* 3D highlight */}
+                              <circle cx={-r * 0.2} cy={-r * 0.2} r={r * 0.3} fill="rgba(255,255,255,0.25)" />
+                              {/* Label pill */}
+                              <rect
+                                x={-fontSize * 1.4}
+                                y={-r * 2.3 - fontSize * 0.6}
+                                width={fontSize * 2.8}
+                                height={fontSize * 1.1}
+                                rx={fontSize * 0.25}
+                                fill="rgba(0,0,0,0.75)"
+                                stroke={isSel ? color : "rgba(255,255,255,0.15)"}
+                                strokeWidth={fontSize * 0.06}
+                              />
+                              <text x={0} y={-r * 2.3} textAnchor="middle" fill={isSel ? "#fff" : "#bbb"}
+                                fontSize={fontSize * 0.75} fontWeight="bold" fontFamily="monospace">
                                 {name}
                               </text>
                             </g>
@@ -405,6 +495,34 @@ export default function LivePitWall() {
                     );
                   })()}
                 </div>
+
+                {/* Speedometer for first selected driver */}
+                {(() => {
+                  const selArr = [...selectedDrivers];
+                  if (selArr.length === 0) return null;
+                  const selNum = selArr[0];
+                  const driver = liveData.timing.find(d => d.driverNumber === selNum);
+                  if (!driver) return null;
+                  const speed = driver.speed || driver.Speed || 0;
+                  const gear = driver.gear || driver.nGear || "—";
+                  const throttle = driver.throttle || driver.Throttle || 0;
+                  const brake = driver.brake || driver.Brake || 0;
+                  const color = driver.teamColor || "#888";
+                  const name = driver.name || selNum;
+                  return (
+                    <div className="flex justify-center mt-3 pt-3 border-t border-white/[0.06]">
+                      <SpeedometerGauge
+                        speed={typeof speed === "number" ? speed : parseFloat(speed) || 0}
+                        gear={gear}
+                        throttle={typeof throttle === "number" ? throttle : parseFloat(throttle) || 0}
+                        brake={typeof brake === "number" ? brake : parseFloat(brake) || 0}
+                        driverColor={color}
+                        size={160}
+                        label={name}
+                      />
+                    </div>
+                  );
+                })()}
               </GlassCard>
             )}
 
