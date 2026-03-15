@@ -45,23 +45,29 @@ export default function RaceReplay() {
 
   const maxLap = data?.maxLap || 60;
 
-  // Fetch replay data + positions for a given lap
+  // Fetch replay data + positions for a given lap (plain fetch, no shared hook state)
   const fetchLap = useCallback(
     async (targetLap) => {
       try {
-        const [result, posResult] = await Promise.all([
-          api.call(`/api/session/replay?lap=${targetLap}`),
-          api.call(`/api/session/replay/positions?lap=${targetLap}`),
+        const [replayRes, posRes] = await Promise.all([
+          fetch(`/api/session/replay?lap=${targetLap}`),
+          fetch(`/api/session/replay/positions?lap=${targetLap}`),
         ]);
-        setData(result);
-        setPosData(posResult);
+        if (replayRes.ok) {
+          const result = await replayRes.json();
+          setData(result);
+        }
+        if (posRes.ok) {
+          const posResult = await posRes.json();
+          setPosData(posResult);
+        }
       } catch (e) {
         console.error("Failed to fetch replay data:", e);
       } finally {
         setLoading(false);
       }
     },
-    [api]
+    []
   );
 
   // Initial fetch
@@ -80,26 +86,24 @@ export default function RaceReplay() {
   }, [lap]);
 
   // Intra-lap animation: smoothly move dots from 0 to 1 within the lap
+  // Wraps around seamlessly — no pause between laps
+  const lapAdvancedRef = useRef(false);
   useEffect(() => {
-    if (!playing || !posData?.drivers) {
+    if (!playing) {
       if (animRef.current) cancelAnimationFrame(animRef.current);
       return;
     }
-    const lapDurationMs = 1500 / playSpeed; // time per lap in animation
+    const lapDurationMs = 20000 / playSpeed; // time per lap — slow like F1 broadcast
 
     const animate = (timestamp) => {
       if (!lastFrameRef.current) lastFrameRef.current = timestamp;
       const elapsed = timestamp - lastFrameRef.current;
       lastFrameRef.current = timestamp;
 
-      progressRef.current = Math.min(progressRef.current + elapsed / lapDurationMs, 1);
-      setTrackProgress(progressRef.current);
+      progressRef.current += elapsed / lapDurationMs;
 
-      if (progressRef.current >= 1) {
-        // Lap done — advance to next lap
-        progressRef.current = 0;
-        lastFrameRef.current = 0;
-        setTrackProgress(0);
+      if (progressRef.current >= 1 && !lapAdvancedRef.current) {
+        lapAdvancedRef.current = true;
         setLap((prev) => {
           if (prev >= maxLap) {
             setPlaying(false);
@@ -107,16 +111,28 @@ export default function RaceReplay() {
           }
           return prev + 1;
         });
-        return;
       }
+
+      // Wrap around so dots keep moving while next lap data loads
+      const wrapped = progressRef.current % 1;
+      setTrackProgress(wrapped);
+
       animRef.current = requestAnimationFrame(animate);
     };
 
     progressRef.current = 0;
     lastFrameRef.current = 0;
+    lapAdvancedRef.current = false;
     animRef.current = requestAnimationFrame(animate);
     return () => { if (animRef.current) cancelAnimationFrame(animRef.current); };
-  }, [playing, posData, playSpeed, maxLap]);
+  }, [playing, playSpeed, maxLap]);
+
+  // When new posData arrives (from a lap change), reset for clean start
+  useEffect(() => {
+    if (posData && playing) {
+      lapAdvancedRef.current = false;
+    }
+  }, [posData]);
 
   const handleSliderChange = (e) => {
     const value = parseInt(e.target.value, 10);
@@ -260,37 +276,67 @@ export default function RaceReplay() {
       </GlassCard>
 
       {/* ── Circuit Map — all cars moving ── */}
-      {posData?.trackOutline?.x?.length > 0 && (
-        <GlassCard className="p-4 relative overflow-hidden" hover delay={0.12}>
-          <div className="flex items-center justify-between mb-2">
-            <h3 className="text-sm font-semibold text-white uppercase tracking-widest">
-              Circuit — Lap {lap}
-            </h3>
-            {lap >= maxLap && (
-              <span className="text-xs font-bold text-white bg-white/10 px-3 py-1 rounded-full animate-pulse">
-                FINISH
-              </span>
-            )}
-          </div>
-          <CircuitSVG
-            outline={posData.trackOutline}
-            drivers={Object.entries(posData.drivers || {}).map(([drv, d]) => {
-              const n = d.x.length;
-              const idx = Math.min(Math.round(trackProgress * (n - 1)), n - 1);
-              return {
-                id: drv,
-                x: d.x[idx],
-                y: d.y[idx],
-                color: d.color || "#fff",
-                label: drv,
-              };
-            })}
-            showStartFinish
-            showCheckered={lap >= maxLap}
-            height={480}
-          />
-        </GlassCard>
-      )}
+      {posData?.trackOutline?.x?.length > 0 && (() => {
+        // Build gap/pit/laps-behind maps from standings
+        const gapMap = {};
+        const pitMap = {};
+        const lappedMap = {};
+        let leaderPace = 90;
+        if (standings.length > 0) {
+          const leaderEntry = standings.find((s) => s.position === 1) || standings[0];
+          if (leaderEntry?.pace) leaderPace = leaderEntry.pace;
+          standings.forEach((s) => {
+            gapMap[s.driver] = s.gap || 0;
+            pitMap[s.driver] = s.pitting || false;
+            lappedMap[s.driver] = s.lapsBehind || 0;
+          });
+        }
+
+        return (
+          <GlassCard className="p-4 relative overflow-hidden" hover delay={0.12}>
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="text-sm font-semibold text-white uppercase tracking-widest">
+                Circuit — Lap {lap}
+              </h3>
+              {lap >= maxLap && (
+                <span className="text-xs font-bold text-white bg-white/10 px-3 py-1 rounded-full">
+                  FINISH
+                </span>
+              )}
+            </div>
+            <CircuitSVG
+              outline={posData.trackOutline}
+              drivers={Object.entries(posData.drivers || {}).map(([drv, d]) => {
+                const n = d.x.length;
+                const gapSec = gapMap[drv] || 0;
+                const gapFraction = gapSec / leaderPace;
+                let driverProgress = trackProgress - gapFraction;
+                driverProgress = ((driverProgress % 1) + 1) % 1;
+                const idx = Math.min(Math.round(driverProgress * (n - 1)), n - 1);
+                const isPitting = pitMap[drv] || false;
+                const lapsBehind = lappedMap[drv] || 0;
+                // Build label: "VER" or "VER PIT" or "VER -1L"
+                let label = drv;
+                if (isPitting) label = `${drv} PIT`;
+                else if (lapsBehind > 0) label = `${drv} -${lapsBehind}L`;
+                return {
+                  id: drv,
+                  x: d.x[idx],
+                  y: d.y[idx],
+                  color: d.color || "#fff",
+                  label,
+                  dimmed: lapsBehind > 0,
+                  pitting: isPitting,
+                };
+              })}
+              showStartFinish
+              showCheckered={lap >= maxLap}
+              thick
+              height={550}
+            />
+          </GlassCard>
+        );
+      })()}
 
       {/* Main content: standings + win probability */}
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-6">
@@ -342,6 +388,16 @@ export default function RaceReplay() {
                           style={{ backgroundColor: s.color || "#888" }}
                         />
                         <span className="text-white font-medium text-xs">{s.driver}</span>
+                        {s.pitting && (
+                          <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-400 ml-1">
+                            PIT
+                          </span>
+                        )}
+                        {s.lapsBehind > 0 && (
+                          <span className="text-[9px] font-mono text-zinc-500 ml-1">
+                            -{s.lapsBehind}L
+                          </span>
+                        )}
                       </div>
                     </td>
                     <td className="px-4 py-2">
@@ -356,7 +412,10 @@ export default function RaceReplay() {
                       </span>
                     </td>
                     <td className="px-4 py-2 font-mono text-zinc-400 text-xs">
-                      {s.gap || "Leader"}
+                      {s.lapsBehind > 0
+                        ? `+${s.lapsBehind} lap${s.lapsBehind > 1 ? "s" : ""}`
+                        : s.gap ? `+${s.gap}s` : "Leader"
+                      }
                     </td>
                     <td className="px-4 py-2">
                       <div className="flex items-center gap-2">
