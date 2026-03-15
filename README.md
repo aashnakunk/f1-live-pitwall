@@ -1,4 +1,4 @@
-# F1 Pit Wall Dashboard
+# F1 telemetry dashboard
 
 A full-stack Formula 1 race engineer dashboard built with **FastF1**, **FastAPI**, and **React**. Load any historical F1 session and explore telemetry, strategy, energy modeling, and AI-powered race analysis through a glassmorphism dark UI.
 
