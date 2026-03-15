@@ -6,6 +6,7 @@ import GlassCard from "../components/GlassCard";
 import PageHeader from "../components/PageHeader";
 import LoadingSpinner from "../components/LoadingSpinner";
 import CircuitSVG from "../components/CircuitSVG";
+import SpeedometerGauge, { ERSStatusIndicator } from "../components/SpeedometerGauge";
 import { useApi } from "../hooks/useApi";
 
 const plotLayout = {
@@ -369,137 +370,184 @@ export default function CircuitLab() {
             </div>
           )}
 
-          {colorMode === "replay" && circuitData?.x ? (
-            <div className="p-2">
+          {(() => {
+            if (!circuitData?.x) {
+              return (
+                <div className="h-[520px] flex items-center justify-center text-zinc-500">
+                  No track data available
+                </div>
+              );
+            }
+
+            const isReplay = colorMode === "replay";
+            const isOverlayMode = ["zones","clipping","ersDeployment","liftCoast","drs"].includes(colorMode);
+            const usesPlotly = !isReplay && !isOverlayMode; // speed/throttle/brake/gear use Plotly for hover+colorbar
+
+            // Build colored segments for overlay modes + replay
+            const buildOverlaySegments = () => {
+              const segs = [];
+              const n = circuitData.x.length;
+              const limit = isReplay ? Math.min(replayIndex, n - 1) : n;
+
+              const getColor = (i) => {
+                if (colorMode === "zones") return ZONE_COLORS[circuitData.zones?.[i]] || "#88888840";
+                if (colorMode === "clipping") return circuitData.clipping?.[i] ? "#ef4444cc" : "#22c55e20";
+                if (colorMode === "ersDeployment") return circuitData.ersDeployment?.[i] ? "#4ade80cc" : "#ffffff08";
+                if (colorMode === "liftCoast") return circuitData.liftCoast?.[i] ? "#3b82f6cc" : "#ffffff08";
+                if (colorMode === "drs") return circuitData.drs?.[i] ? "#a855f7cc" : "#ffffff08";
+                // Replay trail
+                if (isReplay && i >= limit) return null;
+                const isClip = circuitData.clipping?.[i];
+                const isErs = circuitData.ersDeployment?.[i];
+                const isLift = circuitData.liftCoast?.[i];
+                const isDrs = circuitData.drs?.[i];
+                if (isClip) return "#ef444490";
+                if (isDrs) return "#a855f790";
+                if (isErs) return "#4ade8070";
+                if (isLift) return "#3b82f670";
+                return "#ffffff12";
+              };
+
+              for (let i = 0; i < limit; i++) {
+                const c = getColor(i);
+                if (!c) continue;
+                if (segs.length > 0 && segs[segs.length - 1].color === c) {
+                  segs[segs.length - 1].endIdx = i;
+                } else {
+                  segs.push({ startIdx: i, endIdx: i, color: c });
+                }
+              }
+              return segs;
+            };
+
+            // ── Plotly modes (speed/throttle/brake/gear) — keep hover tooltips + colorbar ──
+            if (usesPlotly && trackTrace) {
+              return (
+                <Plot
+                  data={[trackTrace]}
+                  layout={{
+                    ...plotLayout,
+                    height: 520,
+                    xaxis: { scaleanchor: "y", showgrid: false, zeroline: false, showticklabels: false },
+                    yaxis: { showgrid: false, zeroline: false, showticklabels: false },
+                    annotations: cornerAnnotations,
+                    margin: { l: 10, r: 40, t: 10, b: 10 },
+                    paper_bgcolor: "transparent",
+                    plot_bgcolor: "transparent",
+                  }}
+                  config={plotConfig}
+                  useResizeHandler
+                  style={{ width: "100%" }}
+                />
+              );
+            }
+
+            // ── Overlay + Replay modes: thick CircuitSVG ──
+            // Smart layout based on track aspect ratio
+            const xRange = Math.max(...circuitData.x) - Math.min(...circuitData.x);
+            const yRange = Math.max(...circuitData.y) - Math.min(...circuitData.y);
+            const isWideTrack = xRange > yRange * 1.3;
+
+            // ERS status from real telemetry — no fake battery %
+            const ersDeploying = !!(circuitData.ersDeployment?.[replayIndex]);
+            const ersHarvesting = !ersDeploying && (circuitData.brake?.[replayIndex] || 0) > 20;
+
+            const gaugePanel = isReplay && (
+              <div className="flex flex-col items-center gap-3">
+                <SpeedometerGauge
+                  speed={circuitData.speed?.[replayIndex] || 0}
+                  gear={circuitData.gear?.[replayIndex] ?? "—"}
+                  throttle={circuitData.throttle?.[replayIndex] || 0}
+                  brake={circuitData.brake?.[replayIndex] || 0}
+                  driverColor={circuitData.color || "#E10600"}
+                  size={170}
+                  flag={
+                    circuitData.clipping?.[replayIndex] ? "CLIPPING" :
+                    circuitData.drs?.[replayIndex] ? "DRS OPEN" :
+                    circuitData.ersDeployment?.[replayIndex] ? "ERS DEPLOY" :
+                    circuitData.liftCoast?.[replayIndex] ? "LIFT & COAST" : null
+                  }
+                  flagColor={
+                    circuitData.clipping?.[replayIndex] ? "#ef4444" :
+                    circuitData.drs?.[replayIndex] ? "#a855f7" :
+                    circuitData.ersDeployment?.[replayIndex] ? "#22c55e" :
+                    circuitData.liftCoast?.[replayIndex] ? "#3b82f6" : "#666"
+                  }
+                />
+                {/* Distance */}
+                <div className="text-center">
+                  <p className="text-sm font-mono text-white font-bold">
+                    {Math.round(circuitData.distance?.[replayIndex] || 0)}
+                    <span className="text-[9px] text-zinc-500 ml-0.5">m</span>
+                  </p>
+                  <div className="w-16 h-1 rounded-full bg-white/[0.06] overflow-hidden mt-0.5">
+                    <div className="h-full rounded-full transition-all duration-75"
+                      style={{
+                        width: `${((circuitData.distance?.[replayIndex] || 0) / (circuitData.distance?.[circuitData.distance.length - 1] || 1)) * 100}%`,
+                        background: circuitData.color || "#E10600",
+                      }} />
+                  </div>
+                </div>
+              </div>
+            );
+
+            const ersPanel = isReplay && (
+              <ERSStatusIndicator
+                deploying={ersDeploying}
+                harvesting={ersHarvesting}
+              />
+            );
+
+            const circuitSVGElement = (h) => (
               <CircuitSVG
                 outline={{ x: circuitData.x, y: circuitData.y }}
-                drivers={[{
+                drivers={isReplay ? [{
                   id: selectedDriver,
                   x: circuitData.x[replayIndex] || 0,
                   y: circuitData.y[replayIndex] || 0,
                   color: circuitData.color || "#E10600",
                   label: selectedDriver,
-                }]}
-                highlightDriver={selectedDriver}
-                showStartFinish
+                }] : []}
+                highlightDriver={isReplay ? selectedDriver : undefined}
+                showStartFinish thick
                 corners={(circuitData.corners || []).map(c => ({ number: `T${c.number}`, x: c.x, y: c.y }))}
-                trackSegments={(() => {
-                  // Color the trail behind the dot based on speed
-                  const segs = [];
-                  const limit = Math.min(replayIndex, circuitData.x.length - 1);
-                  if (limit > 1) {
-                    // Trailing path colored by clipping/ERS
-                    for (let i = 0; i < limit; i++) {
-                      const isClip = circuitData.clipping?.[i];
-                      const isErs = circuitData.ersDeployment?.[i];
-                      const isLift = circuitData.liftCoast?.[i];
-                      const isDrs = circuitData.drs?.[i];
-                      let color = "#ffffff15";
-                      if (isClip) color = "#ef444480";
-                      else if (isDrs) color = "#a855f780";
-                      else if (isErs) color = "#4ade8060";
-                      else if (isLift) color = "#3b82f660";
-                      // Group adjacent same-color points
-                      if (segs.length > 0 && segs[segs.length - 1].color === color) {
-                        segs[segs.length - 1].endIdx = i;
-                      } else {
-                        segs.push({ startIdx: i, endIdx: i, color });
-                      }
-                    }
-                  }
-                  return segs;
-                })()}
-                height={520}
+                trackSegments={buildOverlaySegments()}
+                height={h}
               />
+            );
 
-              {/* Live telemetry gauges */}
-              <div className="flex items-center justify-center gap-4 py-3 px-4">
-                {/* Speed */}
-                <div className="text-center">
-                  <p className="text-2xl font-bold font-mono text-white">
-                    {Math.round(circuitData.speed?.[replayIndex] || 0)}
-                  </p>
-                  <p className="text-[9px] text-zinc-500 uppercase">km/h</p>
-                </div>
+            if (!isReplay) {
+              // Overlay modes (zones/clipping/ERS/DRS/liftCoast) — just thick SVG, no gauges
+              return <div className="p-2">{circuitSVGElement(540)}</div>;
+            }
 
-                {/* Throttle gauge */}
-                <div className="flex flex-col items-center gap-1">
-                  <div className="w-24 h-2 rounded-full bg-white/10 overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-green-500 transition-all duration-100"
-                      style={{ width: `${circuitData.throttle?.[replayIndex] || 0}%` }}
-                    />
+            // Replay mode — smart gauge positioning
+            return (
+              <div className="p-2">
+                {isWideTrack ? (
+                  // Wide track: circuit on top, gauges below
+                  <>
+                    {circuitSVGElement(480)}
+                    <div className="flex items-center justify-center gap-6 pt-3">
+                      {gaugePanel}
+                      {ersPanel}
+                    </div>
+                  </>
+                ) : (
+                  // Tall track: circuit left, gauges right
+                  <div className="flex items-start gap-4">
+                    <div className="flex-1 min-w-0">
+                      {circuitSVGElement(560)}
+                    </div>
+                    <div className="flex items-start gap-3 pt-4 shrink-0">
+                      {gaugePanel}
+                      {ersPanel}
+                    </div>
                   </div>
-                  <span className="text-[9px] text-zinc-500">THR {Math.round(circuitData.throttle?.[replayIndex] || 0)}%</span>
-                </div>
-
-                {/* Brake gauge */}
-                <div className="flex flex-col items-center gap-1">
-                  <div className="w-24 h-2 rounded-full bg-white/10 overflow-hidden">
-                    <div
-                      className="h-full rounded-full bg-red-500 transition-all duration-100"
-                      style={{ width: `${circuitData.brake?.[replayIndex] || 0}%` }}
-                    />
-                  </div>
-                  <span className="text-[9px] text-zinc-500">BRK {Math.round(circuitData.brake?.[replayIndex] || 0)}%</span>
-                </div>
-
-                {/* Gear */}
-                <div className="text-center">
-                  <p className="text-2xl font-bold font-mono" style={{ color: circuitData.color || "#E10600" }}>
-                    {circuitData.gear?.[replayIndex] ?? "—"}
-                  </p>
-                  <p className="text-[9px] text-zinc-500 uppercase">Gear</p>
-                </div>
-
-                {/* Analysis flags */}
-                <div className="flex flex-col items-center gap-0.5">
-                  {circuitData.clipping?.[replayIndex] ? (
-                    <span className="text-[9px] font-bold text-red-400 bg-red-400/10 px-2 py-0.5 rounded">CLIPPING</span>
-                  ) : circuitData.drs?.[replayIndex] ? (
-                    <span className="text-[9px] font-bold text-purple-400 bg-purple-400/10 px-2 py-0.5 rounded">DRS OPEN</span>
-                  ) : circuitData.ersDeployment?.[replayIndex] ? (
-                    <span className="text-[9px] font-bold text-green-400 bg-green-400/10 px-2 py-0.5 rounded">ERS DEPLOY</span>
-                  ) : circuitData.liftCoast?.[replayIndex] ? (
-                    <span className="text-[9px] font-bold text-blue-400 bg-blue-400/10 px-2 py-0.5 rounded">LIFT & COAST</span>
-                  ) : (
-                    <span className="text-[9px] text-zinc-600 px-2 py-0.5">CLEAN</span>
-                  )}
-                </div>
-
-                {/* Distance progress */}
-                <div className="text-center">
-                  <p className="text-xs font-mono text-zinc-400">
-                    {Math.round(circuitData.distance?.[replayIndex] || 0)}m
-                  </p>
-                  <p className="text-[9px] text-zinc-600">
-                    / {Math.round(circuitData.distance?.[circuitData.distance.length - 1] || 0)}m
-                  </p>
-                </div>
+                )}
               </div>
-            </div>
-          ) : trackTrace ? (
-            <Plot
-              data={[trackTrace]}
-              layout={{
-                ...plotLayout,
-                height: 520,
-                xaxis: { scaleanchor: "y", showgrid: false, zeroline: false, showticklabels: false },
-                yaxis: { showgrid: false, zeroline: false, showticklabels: false },
-                annotations: cornerAnnotations,
-                margin: { l: 10, r: 40, t: 10, b: 10 },
-                paper_bgcolor: "transparent",
-                plot_bgcolor: "transparent",
-              }}
-              config={plotConfig}
-              useResizeHandler
-              style={{ width: "100%" }}
-            />
-          ) : (
-            <div className="h-[520px] flex items-center justify-center text-zinc-500">
-              No track data available
-            </div>
-          )}
+            );
+          })()}
         </GlassCard>
 
         {/* Sidebar: Controls + Driver info */}
