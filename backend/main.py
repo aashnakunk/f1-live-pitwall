@@ -99,6 +99,105 @@ TEAM_COLORS = {
     "Kick Sauber": "#52E252", "Sauber": "#52E252",
 }
 
+# ── Regulation Era Profiles ────────────────────────────────────────────────
+SEASON_PROFILES = {
+    # Pre-2022: V6 turbo-hybrid, high downforce, DRS
+    "v6_hybrid": {
+        "label": "V6 Turbo-Hybrid", "years": range(2014, 2022),
+        "hasDRS": True, "hasActiveAero": False,
+        "mguK_kw": 120, "batteryMJ": 4.0,
+        "fuelEffect": 0.035,  # seconds/lap improvement as fuel burns
+        "notes": "High-downforce era, DRS on straights, ERS limited to 120kW MGU-K.",
+    },
+    # 2022-2025: Ground effect + DRS
+    "ground_effect": {
+        "label": "Ground Effect + DRS", "years": range(2022, 2026),
+        "hasDRS": True, "hasActiveAero": False,
+        "mguK_kw": 120, "batteryMJ": 4.0,
+        "fuelEffect": 0.035,
+        "notes": "Ground-effect aero, simplified wings, DRS retained. Less dirty air = better racing.",
+    },
+    # 2026+: Active aero + no DRS + bigger battery
+    "active_aero": {
+        "label": "Active Aero Era", "years": range(2026, 2040),
+        "hasDRS": False, "hasActiveAero": True,
+        "mguK_kw": 350, "batteryMJ": 4.0,
+        "fuelEffect": 0.030,  # less fuel effect with lighter PU
+        "notes": "No DRS — replaced by X/Z active aero modes. 350kW MGU-K, no MGU-H. Energy management is critical.",
+    },
+}
+
+
+def _get_season_profile(year: int) -> dict:
+    """Return the regulation profile for a given season year."""
+    for key, profile in SEASON_PROFILES.items():
+        if year in profile["years"]:
+            return {"era": key, **profile}
+    # Default fallback for very old seasons
+    return {
+        "era": "legacy", "label": "Legacy", "years": range(2000, 2014),
+        "hasDRS": True if year >= 2011 else False, "hasActiveAero": False,
+        "mguK_kw": 60 if year >= 2009 else 0, "batteryMJ": 0.4 if year >= 2009 else 0,
+        "fuelEffect": 0.040,
+        "notes": f"Pre-hybrid era ({year}). Limited telemetry data available.",
+    }
+
+
+# ── Shared SC/VSC Detection ───────────────────────────────────────────────
+
+def _detect_sc_vsc_laps(laps_df) -> tuple[list[dict], set[int]]:
+    """Detect Safety Car and VSC events from laps dataframe.
+
+    Returns:
+        sc_events: list of {"type": "SC"|"VSC", "startLap": int, "endLap": int}
+        affected_laps: set of lap numbers under SC/VSC (for filtering)
+    """
+    sc_events = []
+    affected_laps = set()
+    if laps_df.empty or "TrackStatus" not in laps_df.columns:
+        return sc_events, affected_laps
+
+    for lap_num in sorted(laps_df["LapNumber"].unique()):
+        lap_data = laps_df[laps_df["LapNumber"] == lap_num]
+        statuses = lap_data["TrackStatus"].dropna().unique()
+        for st in statuses:
+            st_str = str(st)
+            if "4" in st_str or "6" in st_str or "7" in st_str:
+                flag = "SC" if "4" in st_str else "VSC"
+                affected_laps.add(int(lap_num))
+                if not sc_events or sc_events[-1]["type"] != flag or int(lap_num) - sc_events[-1]["endLap"] > 1:
+                    sc_events.append({"type": flag, "startLap": int(lap_num), "endLap": int(lap_num)})
+                else:
+                    sc_events[-1]["endLap"] = int(lap_num)
+
+    return sc_events, affected_laps
+
+
+# ── Fuel-Corrected Lap Times ──────────────────────────────────────────────
+
+def _fuel_correct_laptimes(laps_df, year: int, total_laps: int) -> pd.DataFrame:
+    """Add 'FuelCorrectedSec' column: removes fuel effect to reveal true pace/degradation.
+
+    Fuel burns off linearly, making cars ~0.03-0.04s/lap faster.
+    We normalize all laps to the fuel load at lap 1 so degradation curves are pure tyre wear.
+    """
+    profile = _get_season_profile(year)
+    fuel_effect = profile["fuelEffect"]  # seconds per lap of fuel burned
+
+    df = laps_df.copy()
+    if "LapTime" not in df.columns or df["LapTime"].isna().all():
+        df["FuelCorrectedSec"] = None
+        return df
+
+    df["LapTimeSec"] = df["LapTime"].dt.total_seconds()
+    # Each lap, the car is lighter by fuel_effect * (lap_number - 1).
+    # To normalize to lap-1 fuel load, ADD back the fuel benefit.
+    df["FuelCorrectedSec"] = df["LapTimeSec"] + df["LapNumber"].apply(
+        lambda ln: fuel_effect * (ln - 1)
+    )
+    return df
+
+
 # In-memory session store
 _session = None
 _session_key = None
@@ -140,6 +239,9 @@ def load_session(year: int = Query(...), gp: str = Query(...), session_type: str
     global _session, _session_key
     key = (year, gp, session_type)
     if _session_key == key and _session is not None:
+        # Re-fetch headshots if cache is empty (e.g. after switching from historical session)
+        if not _headshot_cache:
+            threading.Thread(target=_fetch_headshots, args=(year,), daemon=True).start()
         return {"status": "already_loaded", "event": _session.event["EventName"]}
     sess = fastf1.get_session(year, gp, session_type)
     sess.load()
@@ -148,6 +250,20 @@ def load_session(year: int = Query(...), gp: str = Query(...), session_type: str
     # Fetch headshots in background (non-blocking)
     threading.Thread(target=_fetch_headshots, args=(year,), daemon=True).start()
     return {"status": "loaded", "event": sess.event["EventName"], "year": int(sess.event.year)}
+
+
+# ── Season Profile ─────────────────────────────────────────────────────────
+
+@app.get("/api/session/profile")
+def get_session_profile():
+    """Return regulation-era profile for the currently loaded session."""
+    s = _get_session()
+    year = int(s.event.year)
+    profile = _get_season_profile(year)
+    # Remove range objects (not JSON serializable)
+    profile_clean = {k: v for k, v in profile.items() if k != "years"}
+    profile_clean["year"] = year
+    return profile_clean
 
 
 # ── Overview ────────────────────────────────────────────────────────────────
@@ -225,25 +341,14 @@ def get_overview():
         finishers = len(results)
     total_drivers = len(results)
 
-    # SC/VSC events — scan lap by lap (same approach as pitstrategy endpoint)
-    sc_events = []
-    if not laps.empty and "TrackStatus" in laps.columns:
-        for lap_num in sorted(laps["LapNumber"].unique()):
-            lap_data = laps[laps["LapNumber"] == lap_num]
-            statuses = lap_data["TrackStatus"].dropna().unique()
-            for st in statuses:
-                st_str = str(st)
-                if "4" in st_str or "6" in st_str or "7" in st_str:
-                    flag = "SC" if "4" in st_str else "VSC"
-                    if not sc_events or sc_events[-1]["type"] != flag or int(lap_num) - sc_events[-1]["endLap"] > 1:
-                        sc_events.append({"type": flag, "startLap": int(lap_num), "endLap": int(lap_num)})
-                    else:
-                        sc_events[-1]["endLap"] = int(lap_num)
+    # SC/VSC events
+    sc_events, sc_affected_laps = _detect_sc_vsc_laps(laps)
 
-    # Fastest lap
+    # Fastest lap (exclude SC/VSC laps — those are artificially slow)
     fastest_lap_driver = None
     fastest_lap_time = None
     valid_laps = laps[laps["LapTime"].notna() & laps["PitInTime"].isna() & laps["PitOutTime"].isna()]
+    valid_laps = valid_laps[~valid_laps["LapNumber"].isin(sc_affected_laps)]
     if not valid_laps.empty:
         fl = valid_laps.loc[valid_laps["LapTime"].idxmin()]
         fastest_lap_driver = fl["Driver"]
@@ -376,11 +481,19 @@ def get_laptimes():
     results = s.results
     top5 = results.sort_values("Position").head(5)["Abbreviation"].tolist()
 
+    # SC / VSC detection + fuel correction
+    sc_events, sc_affected_laps = _detect_sc_vsc_laps(laps)
+    year = int(s.event.year)
+    total_laps = int(laps["LapNumber"].max()) if not laps.empty else 0
+
     traces = []
+    fuel_traces = []
     pit_laps = set()
     for drv in top5:
         dl = laps[laps["Driver"] == drv].copy()
         dl = dl[dl["PitInTime"].isna() & dl["PitOutTime"].isna()].dropna(subset=["LapTime"])
+        # Exclude SC/VSC laps from pace analysis
+        dl = dl[~dl["LapNumber"].isin(sc_affected_laps)]
         dl["LapTimeSec"] = dl["LapTime"].dt.total_seconds()
         median = dl["LapTimeSec"].median()
         if pd.notna(median):
@@ -392,24 +505,37 @@ def get_laptimes():
             "laps": dl["LapNumber"].tolist(),
             "times": dl["LapTimeSec"].round(3).tolist(),
         })
+        # Fuel-corrected trace
+        dl_fc = _fuel_correct_laptimes(dl, year, total_laps)
+        if "FuelCorrectedSec" in dl_fc.columns:
+            fuel_traces.append({
+                "driver": drv, "color": color,
+                "laps": dl_fc["LapNumber"].tolist(),
+                "times": dl_fc["FuelCorrectedSec"].round(3).tolist(),
+            })
         pits = laps[(laps["Driver"] == drv) & laps["PitInTime"].notna()]["LapNumber"].tolist()
         pit_laps.update(int(p) for p in pits)
 
-    # Degradation
+    # Degradation (fuel-corrected for accurate tyre wear measurement)
     deg_rows = []
     for drv in top5:
         dl = laps[laps["Driver"] == drv].sort_values("LapNumber").copy().dropna(subset=["LapTime"])
-        dl["LapTimeSec"] = dl["LapTime"].dt.total_seconds()
+        # Exclude SC/VSC laps
+        dl = dl[~dl["LapNumber"].isin(sc_affected_laps)]
+        dl = _fuel_correct_laptimes(dl, year, total_laps)
         groups = dl.groupby((dl["Compound"] != dl["Compound"].shift()).cumsum())
         stint_num = 1
         for _, stint in groups:
             clean = stint[stint["PitInTime"].isna() & stint["PitOutTime"].isna()]
-            med = clean["LapTimeSec"].median()
+            if "FuelCorrectedSec" not in clean.columns or clean["FuelCorrectedSec"].isna().all():
+                stint_num += 1
+                continue
+            med = clean["FuelCorrectedSec"].median()
             if pd.notna(med):
-                clean = clean[clean["LapTimeSec"] < med * 1.10]
+                clean = clean[clean["FuelCorrectedSec"] < med * 1.10]
             if len(clean) >= 3:
                 x = np.arange(len(clean))
-                y = clean["LapTimeSec"].values
+                y = clean["FuelCorrectedSec"].values
                 slope, _, r, _, _ = stats.linregress(x, y)
                 deg_rows.append({
                     "driver": drv, "stint": stint_num,
@@ -420,22 +546,12 @@ def get_laptimes():
                 })
             stint_num += 1
 
-    # SC / VSC detection
-    sc_events = []
-    if "TrackStatus" in laps.columns:
-        for lap_num in sorted(laps["LapNumber"].unique()):
-            lap_data = laps[laps["LapNumber"] == lap_num]
-            statuses = lap_data["TrackStatus"].dropna().unique()
-            for st in statuses:
-                st_str = str(st)
-                if "4" in st_str or "6" in st_str or "7" in st_str:
-                    flag = "SC" if "4" in st_str else "VSC"
-                    if not sc_events or sc_events[-1]["type"] != flag or int(lap_num) - sc_events[-1]["endLap"] > 1:
-                        sc_events.append({"type": flag, "startLap": int(lap_num), "endLap": int(lap_num)})
-                    else:
-                        sc_events[-1]["endLap"] = int(lap_num)
-
-    return {"traces": traces, "pitLaps": sorted(pit_laps), "degradation": deg_rows, "scEvents": sc_events}
+    return {
+        "traces": traces, "fuelCorrectedTraces": fuel_traces,
+        "pitLaps": sorted(pit_laps), "degradation": deg_rows,
+        "scEvents": sc_events, "scAffectedLaps": sorted(sc_affected_laps),
+        "fuelEffect": _get_season_profile(year)["fuelEffect"],
+    }
 
 
 # ── Predictions ─────────────────────────────────────────────────────────────
@@ -446,21 +562,31 @@ def get_predictions(threshold: float = Query(1.5)):
     laps = s.laps
     results = s.results
     drivers = laps["Driver"].unique().tolist()
+    year = int(s.event.year)
+    total_laps = int(laps["LapNumber"].max()) if not laps.empty else 0
 
-    # Tyre life predictor
+    # Exclude SC/VSC laps from analysis
+    _, sc_affected_laps = _detect_sc_vsc_laps(laps)
+
+    # Tyre life predictor (fuel-corrected for accurate degradation)
     tyre_pred = []
     for drv in drivers:
         dl = laps[laps["Driver"] == drv].sort_values("LapNumber").copy().dropna(subset=["LapTime"])
-        dl["s"] = dl["LapTime"].dt.total_seconds()
+        dl = dl[~dl["LapNumber"].isin(sc_affected_laps)]
+        dl = _fuel_correct_laptimes(dl, year, total_laps)
+        col = "FuelCorrectedSec" if "FuelCorrectedSec" in dl.columns and not dl["FuelCorrectedSec"].isna().all() else "LapTimeSec"
+        if col == "LapTimeSec" and "LapTimeSec" not in dl.columns:
+            dl["LapTimeSec"] = dl["LapTime"].dt.total_seconds()
+            col = "LapTimeSec"
         groups = dl.groupby((dl["Compound"] != dl["Compound"].shift()).cumsum())
         for _, stint in groups:
             clean = stint[stint["PitInTime"].isna() & stint["PitOutTime"].isna()]
-            med = clean["s"].median()
+            med = clean[col].median()
             if pd.notna(med):
-                clean = clean[clean["s"] < med * 1.10]
+                clean = clean[clean[col] < med * 1.10]
             if len(clean) < 3:
                 continue
-            slope, intercept, *_ = stats.linregress(np.arange(len(clean)), clean["s"].values)
+            slope, intercept, *_ = stats.linregress(np.arange(len(clean)), clean[col].values)
             life = threshold / slope if slope > 0 else 999
             tyre_pred.append({
                 "driver": drv,
@@ -470,10 +596,11 @@ def get_predictions(threshold: float = Query(1.5)):
                 "degPerLap": round(slope, 4),
             })
 
-    # Pace adjusted
+    # Pace adjusted (SC-filtered)
     pace = []
     for drv in drivers:
         dl = laps[laps["Driver"] == drv].copy().dropna(subset=["LapTime"])
+        dl = dl[~dl["LapNumber"].isin(sc_affected_laps)]
         dl["s"] = dl["LapTime"].dt.total_seconds()
         clean = dl[dl["PitInTime"].isna() & dl["PitOutTime"].isna()]
         med = clean["s"].median()
@@ -532,9 +659,9 @@ def get_energy(driver: str = Query(...)):
     throttle = tel["Throttle"].values
     brake = tel["Brake"].values.astype(float)
     gear = tel["nGear"].values.tolist() if "nGear" in tel.columns else None
-    # DRS: 0=off, 8=eligible, 10/12/14=open (>=10 means flap open)
+    # DRS: 0/1=off, 2=not detected, 8=eligible, 10/12/14=open
     drs_raw = tel["DRS"].values.astype(int) if "DRS" in tel.columns else None
-    drs_map = [1 if (drs_raw is not None and int(drs_raw[i]) >= 10) else 0 for i in range(len(speed))] if drs_raw is not None else None
+    drs_map = [1 if int(drs_raw[i]) >= 10 else 0 for i in range(len(speed))] if drs_raw is not None else None
 
     zones = []
     for i in range(len(tel)):
@@ -773,10 +900,22 @@ def get_replay(lap: int = Query(...)):
 
         safe_pace = round(pace, 3) if pace is not None and not (isinstance(pace, float) and np.isnan(pace)) else None
         safe_gap = round(gap, 1) if not (isinstance(gap, float) and np.isnan(gap)) else 0.0
+
+        # Pit detection: check if driver pitted on this lap
+        pit_in = row.get("PitInTime")
+        pit_out = row.get("PitOutTime")
+        pitting = bool(pd.notna(pit_in) or pd.notna(pit_out))
+
+        # Lap deficit: how many laps behind the leader
+        drv_laps_completed = len(live_laps[(live_laps["Driver"] == drv) & live_laps["LapTime"].notna()])
+        leader_laps_completed = len(live_laps[(live_laps["Driver"] == latest.iloc[0]["Driver"]) & live_laps["LapTime"].notna()]) if not latest.empty else drv_laps_completed
+        laps_behind = max(0, leader_laps_completed - drv_laps_completed)
+
         rows.append({
             "driver": drv, "position": int(pos), "pace": safe_pace,
             "tyre": compound, "tyreAge": int(tyre_age), "gap": safe_gap,
-            "color": color, "_pace": pace if pace is not None and not (isinstance(pace, float) and np.isnan(pace)) else None, "_pos": float(pos), "_gap": safe_gap, "_tyreAge": tyre_age,
+            "color": color, "pitting": pitting, "lapsBehind": laps_behind,
+            "_pace": pace if pace is not None and not (isinstance(pace, float) and np.isnan(pace)) else None, "_pos": float(pos), "_gap": safe_gap, "_tyreAge": tyre_age,
         })
 
     # ── Leadership streak: how many laps each driver has been P1 ──
@@ -1448,6 +1587,17 @@ def _gather_chat_context(page: str) -> str:
         base += "These are estimates based on telemetry patterns. Real ERS data is not publicly available.\n"
         base += "Corner cards show per-corner entry/exit speed, clipping %, ERS deploy %, and lift-coast count.\n"
 
+    # Always include regulation era context
+    year = int(s.event.year) if hasattr(s, "event") else 2024
+    profile = _get_season_profile(year)
+    base += f"\nRegulation era: {profile['label']} ({profile['era']})\n"
+    base += f"- DRS: {'Yes' if profile['hasDRS'] else 'No (replaced by active aero X/Z modes)'}\n"
+    base += f"- MGU-K: {profile['mguK_kw']}kW, Battery: {profile['batteryMJ']}MJ\n"
+    base += f"- Fuel effect: ~{profile['fuelEffect']}s/lap improvement as fuel burns off\n"
+    base += f"- {profile['notes']}\n"
+    base += "- SC/VSC laps are automatically filtered from pace analysis and degradation calculations.\n"
+    base += "- Fuel-corrected lap times are available to reveal pure tyre degradation vs fuel-weight improvement.\n"
+
     return base
 
 
@@ -1667,6 +1817,16 @@ def get_circuit(
     throttle = tel["Throttle"].values
     brake = tel["Brake"].values.astype(float)
     gear = tel["nGear"].values.tolist() if "nGear" in tel.columns else None
+
+    # DRS extraction (era-aware — only for seasons with DRS)
+    # FastF1 DRS: 0/1=off, 2=not detected, 8=eligible, 10/12/14=open
+    year = int(s.event.year)
+    profile = _get_season_profile(year)
+    drs_raw = tel["DRS"].values.astype(int) if "DRS" in tel.columns else None
+    if profile["hasDRS"] and drs_raw is not None:
+        drs_map = [1 if int(drs_raw[i]) >= 10 else 0 for i in range(len(speed))]
+    else:
+        drs_map = None
 
     # Classify zones
     zones = []
@@ -1950,19 +2110,7 @@ def get_pit_strategy():
                                 })
 
     # ── SC / VSC Detection ──
-    sc_events = []
-    if "TrackStatus" in laps.columns:
-        for lap_num in sorted(laps["LapNumber"].unique()):
-            lap_data = laps[laps["LapNumber"] == lap_num]
-            statuses = lap_data["TrackStatus"].dropna().unique()
-            for st in statuses:
-                st_str = str(st)
-                if "4" in st_str or "6" in st_str or "7" in st_str:
-                    flag = "SC" if "4" in st_str else "VSC" if "6" in st_str or "7" in st_str else "Yellow"
-                    if not sc_events or sc_events[-1]["type"] != flag or int(lap_num) - sc_events[-1]["endLap"] > 1:
-                        sc_events.append({"type": flag, "startLap": int(lap_num), "endLap": int(lap_num)})
-                    else:
-                        sc_events[-1]["endLap"] = int(lap_num)
+    sc_events, _ = _detect_sc_vsc_laps(laps)
 
     max_lap = int(laps["LapNumber"].max()) if not laps.empty else 0
 
@@ -1973,6 +2121,325 @@ def get_pit_strategy():
         "scEvents": sc_events,
         "maxLap": max_lap,
     }
+
+
+# ── Lap Insight Narratives (Race Engineer Commentary) ──────────────────────
+
+@app.get("/api/session/insights")
+def get_insights():
+    """Generate race-engineer-style commentary: gap trends, strategy calls,
+    pace comparisons, and predicted overtakes."""
+    s = _get_session()
+    laps = s.laps
+    results = s.results
+    year = int(s.event.year)
+    total_laps = int(laps["LapNumber"].max()) if not laps.empty else 0
+    if total_laps == 0:
+        return {"insights": []}
+
+    sc_events, sc_affected = _detect_sc_vsc_laps(laps)
+    driver_order = results.sort_values("Position")["Abbreviation"].tolist()
+    insights = []
+
+    # ── 1. Gap trends between consecutive positions (top 10) ──
+    top10 = driver_order[:10]
+    for i in range(len(top10) - 1):
+        ahead = top10[i]
+        behind = top10[i + 1]
+        # Get clean lap times for last 5 laps
+        a_laps = laps[(laps["Driver"] == ahead) & laps["LapTime"].notna()
+                      & laps["PitInTime"].isna() & ~laps["LapNumber"].isin(sc_affected)].tail(5)
+        b_laps = laps[(laps["Driver"] == behind) & laps["LapTime"].notna()
+                      & laps["PitInTime"].isna() & ~laps["LapNumber"].isin(sc_affected)].tail(5)
+        if len(a_laps) < 3 or len(b_laps) < 3:
+            continue
+        a_pace = a_laps["LapTime"].dt.total_seconds().values
+        b_pace = b_laps["LapTime"].dt.total_seconds().values
+        min_len = min(len(a_pace), len(b_pace))
+        deltas = b_pace[:min_len] - a_pace[:min_len]
+        avg_delta = float(np.mean(deltas))
+        trend = "closing" if avg_delta < -0.1 else "pulling away" if avg_delta > 0.1 else "matching pace"
+
+        if abs(avg_delta) > 0.1:
+            severity = "high" if abs(avg_delta) > 0.4 else "medium"
+            if trend == "closing":
+                msg = f"{behind} is {trend} on {ahead} at {abs(avg_delta):.2f}s/lap over the last {min_len} laps."
+                # Estimate laps to catch
+                final_gap = float(b_laps.iloc[-1].get("LapTime", pd.Timedelta(0)).total_seconds() -
+                                  a_laps.iloc[-1].get("LapTime", pd.Timedelta(0)).total_seconds()) if len(a_laps) > 0 and len(b_laps) > 0 else 0
+                if avg_delta < -0.15:
+                    msg += f" At this rate, could be within DRS range in ~{max(1, int(abs(final_gap) / abs(avg_delta)))} laps."
+            else:
+                msg = f"{ahead} is {trend} from {behind} at {abs(avg_delta):.2f}s/lap."
+            insights.append({"type": "gap_trend", "severity": severity, "message": msg,
+                             "drivers": [ahead, behind], "lap": total_laps})
+
+    # ── 2. Tyre cliff warnings ──
+    for drv in driver_order[:10]:
+        dl = laps[laps["Driver"] == drv].sort_values("LapNumber")
+        if dl.empty:
+            continue
+        last = dl.iloc[-1]
+        tyre_age = float(last.get("TyreLife", 0) or 0)
+        compound = str(last.get("Compound", "MEDIUM")).upper()
+        cliff = TYRE_CLIFF.get(compound, 30)
+        if tyre_age >= cliff * 0.85:
+            pct = round(tyre_age / cliff * 100)
+            insights.append({
+                "type": "tyre_warning", "severity": "high" if tyre_age >= cliff else "medium",
+                "message": f"{drv} on {compound} tyres at {int(tyre_age)} laps ({pct}% of predicted cliff). "
+                           f"{'Box box box!' if tyre_age >= cliff else 'Consider pitting soon.'}",
+                "drivers": [drv], "lap": total_laps,
+            })
+
+    # ── 3. Undercut/overcut windows ──
+    for i in range(len(top10) - 1):
+        ahead = top10[i]
+        behind = top10[i + 1]
+        a_last = laps[laps["Driver"] == ahead].sort_values("LapNumber").iloc[-1] if not laps[laps["Driver"] == ahead].empty else None
+        b_last = laps[laps["Driver"] == behind].sort_values("LapNumber").iloc[-1] if not laps[laps["Driver"] == behind].empty else None
+        if a_last is None or b_last is None:
+            continue
+        a_age = float(a_last.get("TyreLife", 0) or 0)
+        b_age = float(b_last.get("TyreLife", 0) or 0)
+        if b_age > a_age + 5 and b_age > 15:
+            insights.append({
+                "type": "strategy", "severity": "medium",
+                "message": f"Undercut window for {behind} on {ahead}: {behind}'s tyres are {int(b_age - a_age)} laps older. "
+                           f"Pitting now could gain track position on fresh rubber.",
+                "drivers": [behind, ahead], "lap": total_laps,
+            })
+
+    # ── 4. Fastest driver not in top position ──
+    clean_laps = laps[laps["PitInTime"].isna() & laps["PitOutTime"].isna()
+                      & laps["LapTime"].notna() & ~laps["LapNumber"].isin(sc_affected)]
+    if not clean_laps.empty:
+        pace_by_driver = clean_laps.groupby("Driver")["LapTime"].apply(
+            lambda x: x.dt.total_seconds().median()
+        ).sort_values()
+        if len(pace_by_driver) >= 2:
+            fastest = pace_by_driver.index[0]
+            fastest_pos = results[results["Abbreviation"] == fastest]["Position"].values
+            if len(fastest_pos) > 0 and pd.notna(fastest_pos[0]) and int(fastest_pos[0]) > 1:
+                insights.append({
+                    "type": "pace_mismatch", "severity": "medium",
+                    "message": f"{fastest} has the best race pace ({pace_by_driver.iloc[0]:.3f}s median) "
+                               f"but finished P{int(fastest_pos[0])}. Pace advantage: "
+                               f"{pace_by_driver.iloc[1] - pace_by_driver.iloc[0]:.3f}s over {pace_by_driver.index[1]}.",
+                    "drivers": [fastest], "lap": total_laps,
+                })
+
+    # ── 5. SC/VSC impact narratives ──
+    for ev in sc_events:
+        # Check who benefited from SC pit stops
+        sc_lap_range = range(ev["startLap"], ev["endLap"] + 1)
+        pitters = []
+        for drv in driver_order:
+            pit_laps_drv = laps[(laps["Driver"] == drv) & laps["PitInTime"].notna()]["LapNumber"].tolist()
+            if any(int(pl) in sc_lap_range for pl in pit_laps_drv):
+                pitters.append(drv)
+        if pitters:
+            insights.append({
+                "type": "sc_impact", "severity": "high",
+                "message": f"{ev['type']} on laps {ev['startLap']}-{ev['endLap']}. "
+                           f"Cheap stop for: {', '.join(pitters[:5])}.",
+                "drivers": pitters[:5], "lap": ev["startLap"],
+            })
+
+    # Sort by severity then lap
+    severity_order = {"high": 0, "medium": 1, "low": 2}
+    insights.sort(key=lambda x: (severity_order.get(x["severity"], 2), -x.get("lap", 0)))
+
+    return {"insights": insights[:25]}  # Cap at 25
+
+
+# ── Overtake Probability ──────────────────────────────────────────────────
+
+@app.get("/api/session/overtake-probability")
+def get_overtake_probability(lap: Optional[int] = Query(None)):
+    """Predict overtake likelihood for each consecutive pair based on gap,
+    closing speed, tyre delta, DRS availability, and energy patterns."""
+    s = _get_session()
+    laps_df = s.laps
+    results = s.results
+    year = int(s.event.year)
+    profile = _get_season_profile(year)
+    max_lap = int(laps_df["LapNumber"].max()) if not laps_df.empty else 0
+    target_lap = lap if lap is not None else max_lap
+    _, sc_affected = _detect_sc_vsc_laps(laps_df)
+
+    live_laps = laps_df[laps_df["LapNumber"] <= target_lap]
+    if live_laps.empty:
+        return {"probabilities": [], "lap": target_lap}
+
+    latest = live_laps[live_laps["LapNumber"] == target_lap].sort_values("Position")
+    if latest.empty:
+        latest = live_laps.groupby("Driver").last().sort_values("Position").reset_index()
+
+    probabilities = []
+    for idx in range(1, len(latest)):
+        behind_row = latest.iloc[idx]
+        ahead_row = latest.iloc[idx - 1]
+        behind = behind_row["Driver"]
+        ahead = ahead_row["Driver"]
+
+        # Gap: cumulative time difference
+        behind_cum = live_laps[live_laps["Driver"] == behind]["LapTime"].dropna().dt.total_seconds().sum()
+        ahead_cum = live_laps[live_laps["Driver"] == ahead]["LapTime"].dropna().dt.total_seconds().sum()
+        gap = abs(behind_cum - ahead_cum)
+
+        # Closing speed: pace difference over last 5 clean laps
+        def _recent_pace(drv):
+            dl = live_laps[(live_laps["Driver"] == drv) & live_laps["LapTime"].notna()
+                          & live_laps["PitInTime"].isna() & ~live_laps["LapNumber"].isin(sc_affected)].tail(5)
+            return dl["LapTime"].dt.total_seconds().median() if not dl.empty else None
+
+        behind_pace = _recent_pace(behind)
+        ahead_pace = _recent_pace(ahead)
+        closing_rate = (ahead_pace - behind_pace) if (ahead_pace and behind_pace) else 0
+
+        # Tyre condition
+        behind_age = float(behind_row.get("TyreLife", 0) or 0)
+        ahead_age = float(ahead_row.get("TyreLife", 0) or 0)
+        behind_compound = str(behind_row.get("Compound", "MEDIUM")).upper()
+        ahead_compound = str(ahead_row.get("Compound", "MEDIUM")).upper()
+        behind_cliff = TYRE_CLIFF.get(behind_compound, 30)
+        ahead_cliff = TYRE_CLIFF.get(ahead_compound, 30)
+        tyre_advantage = (ahead_age / ahead_cliff) - (behind_age / behind_cliff)  # positive = behind has fresher tyres
+
+        # Score components (0-100 scale)
+        # Gap score: closer = higher (within 3s is DRS range)
+        gap_score = max(0, (3 - gap) / 3) * 35 if gap < 5 else 0
+
+        # Closing rate score
+        closing_score = min(max(closing_rate, 0), 1.0) / 1.0 * 25
+
+        # Tyre advantage score
+        tyre_score = min(max(tyre_advantage, -0.5), 0.5) / 0.5 * 20
+
+        # DRS boost (if within 1s and DRS era)
+        drs_boost = 10 if (profile["hasDRS"] and gap < 1.0) else 0
+        # Active aero boost for 2026+ (less powerful but still helps)
+        aero_boost = 5 if (profile["hasActiveAero"] and gap < 1.5) else 0
+
+        # Position factor: harder to overtake for higher positions
+        pos_factor = max(0, 10 - int(behind_row.get("Position", 10) or 10)) / 10 * 10
+
+        total = max(0, min(100, gap_score + closing_score + tyre_score + drs_boost + aero_boost + pos_factor))
+
+        # Narrative
+        factors = []
+        if gap < 1.0:
+            factors.append(f"within DRS range ({gap:.1f}s)")
+        elif gap < 2.0:
+            factors.append(f"gap closing ({gap:.1f}s)")
+        if closing_rate > 0.2:
+            factors.append(f"gaining {closing_rate:.2f}s/lap")
+        if tyre_advantage > 0.15:
+            factors.append("fresher tyres")
+        elif tyre_advantage < -0.15:
+            factors.append("older tyres")
+        if drs_boost > 0:
+            factors.append("DRS available")
+
+        team_b = results[results["Abbreviation"] == behind]["TeamName"].values
+        team_a = results[results["Abbreviation"] == ahead]["TeamName"].values
+        color_b = TEAM_COLORS.get(team_b[0], "#FFF") if len(team_b) > 0 else "#FFF"
+        color_a = TEAM_COLORS.get(team_a[0], "#FFF") if len(team_a) > 0 else "#FFF"
+
+        probabilities.append({
+            "attacker": behind, "attackerColor": color_b,
+            "defender": ahead, "defenderColor": color_a,
+            "probability": round(total, 1),
+            "gap": round(gap, 2),
+            "closingRate": round(closing_rate, 3) if closing_rate else 0,
+            "tyreDelta": round(tyre_advantage, 2),
+            "factors": factors,
+            "position": int(behind_row.get("Position", 0) or 0),
+        })
+
+    probabilities.sort(key=lambda x: x["probability"], reverse=True)
+
+    return {"probabilities": probabilities, "lap": target_lap, "maxLap": max_lap, "hasDRS": profile["hasDRS"]}
+
+
+# ── Track Evolution ────────────────────────────────────────────────────────
+
+@app.get("/api/session/track-evolution")
+def get_track_evolution():
+    """Analyze grip improvement across the session.
+
+    Track rubbers in over a weekend: lap times improve 0.5-1.5s as rubber
+    is laid down. This endpoint tracks that evolution and normalizes for it.
+    """
+    s = _get_session()
+    laps = s.laps
+    results = s.results
+    year = int(s.event.year)
+    total_laps = int(laps["LapNumber"].max()) if not laps.empty else 0
+    if total_laps == 0:
+        return {"evolution": [], "summary": {}}
+
+    _, sc_affected = _detect_sc_vsc_laps(laps)
+
+    # Track best lap time per lap number (across all drivers, clean laps only)
+    clean = laps[laps["LapTime"].notna() & laps["PitInTime"].isna()
+                 & laps["PitOutTime"].isna() & ~laps["LapNumber"].isin(sc_affected)]
+    if clean.empty:
+        return {"evolution": [], "summary": {}}
+
+    clean = clean.copy()
+    clean["LapTimeSec"] = clean["LapTime"].dt.total_seconds()
+
+    # Per-lap: median of top 5 fastest drivers (avoids outliers)
+    evolution = []
+    for ln in sorted(clean["LapNumber"].unique()):
+        lap_data = clean[clean["LapNumber"] == ln]["LapTimeSec"]
+        if len(lap_data) < 3:
+            continue
+        top5_median = lap_data.nsmallest(5).median()
+        evolution.append({"lap": int(ln), "bestMedian": round(top5_median, 3)})
+
+    if len(evolution) < 5:
+        return {"evolution": evolution, "summary": {}}
+
+    # Fit linear trend to see overall improvement
+    laps_arr = np.array([e["lap"] for e in evolution])
+    times_arr = np.array([e["bestMedian"] for e in evolution])
+    slope, intercept, r_value, _, _ = stats.linregress(laps_arr, times_arr)
+
+    # Split into thirds for phase analysis
+    third = len(evolution) // 3
+    early = np.median([e["bestMedian"] for e in evolution[:third]])
+    mid = np.median([e["bestMedian"] for e in evolution[third:2*third]])
+    late = np.median([e["bestMedian"] for e in evolution[2*third:]])
+
+    # Fuel-correct to isolate track evolution from fuel effect
+    profile = _get_season_profile(year)
+    fuel_effect = profile["fuelEffect"]
+    fc_evolution = []
+    for e in evolution:
+        fc_time = e["bestMedian"] + fuel_effect * (e["lap"] - 1)
+        fc_evolution.append({"lap": e["lap"], "fuelCorrected": round(fc_time, 3)})
+
+    # Re-fit on fuel-corrected data for pure track evolution
+    fc_times = np.array([e["fuelCorrected"] for e in fc_evolution])
+    fc_slope, fc_intercept, fc_r, _, _ = stats.linregress(laps_arr, fc_times)
+
+    summary = {
+        "totalImprovement": round(float(times_arr[0] - times_arr[-1]), 3),
+        "fuelCorrectedImprovement": round(float(fc_times[0] - fc_times[-1]), 3),
+        "slopePerLap": round(float(slope), 4),
+        "fuelCorrectedSlope": round(float(fc_slope), 4),
+        "rSquared": round(float(r_value ** 2), 3),
+        "earlyPace": round(float(early), 3),
+        "midPace": round(float(mid), 3),
+        "latePace": round(float(late), 3),
+        "trackRubberedIn": fc_slope < -0.005,  # True if track is getting faster (after fuel correction)
+        "fuelEffect": fuel_effect,
+    }
+
+    return {"evolution": evolution, "fuelCorrectedEvolution": fc_evolution, "summary": summary}
 
 
 # ── Drivers list ────────────────────────────────────────────────────────────
@@ -2025,25 +2492,40 @@ _live_positions: dict[str, dict] = {}
 _live_driver_info_cache: dict = {}
 _live_pos_history: dict[str, list] = {}  # per driver: list of {"x", "y", "ts"} for location fusion
 
+# ── Incremental parsing cache ──
+# Instead of re-parsing the entire file on every /api/live/data call,
+# we track how many bytes we've already parsed and only read new data.
+_live_parse_cache = {
+    "file": None,           # which file we parsed
+    "offset": 0,            # bytes already consumed
+    "mtime": 0,             # last known mtime
+    "result": None,         # cached response dict
+    "timing": {},           # accumulated timing dict
+    "weather": None,
+    "race_control": [],
+    "car_telemetry": {},
+    "telemetry_history": {},
+    "positions": {},
+    "gap_history": {},
+    "stint_history": {},
+    "lap_times_history": {},
+    "line_count": 0,
+}
+
 
 @app.get("/api/live/status")
 def live_status():
     f = _get_live_file()
     has_data = f.exists() and f.stat().st_size > 0
+    # Use file size as a fast proxy for data points (avoids reading entire file)
+    data_points = _live_parse_cache["line_count"] if _live_parse_cache["line_count"] > 0 else (f.stat().st_size // 200 if has_data else 0)
     return {
         "recording": _live_running,
         "hasData": has_data,
-        "dataPoints": _count_lines(f) if has_data else 0,
+        "dataPoints": data_points,
         "error": _live_error,
         "source": str(f.name) if has_data else None,
     }
-
-
-def _count_lines(filepath=None):
-    try:
-        return sum(1 for _ in open(filepath or _get_live_file()))
-    except Exception:
-        return 0
 
 
 @app.post("/api/live/start")
@@ -2089,32 +2571,85 @@ def clear_live_data():
     for f in [_LIVE_FILE_CACHE, _LIVE_FILE_ROOT]:
         if f.exists():
             f.unlink()
+    # Reset incremental parse cache
+    _live_parse_cache.update({
+        "file": None, "offset": 0, "mtime": 0, "result": None,
+        "timing": {}, "weather": None, "race_control": [],
+        "car_telemetry": {}, "telemetry_history": {}, "positions": {},
+        "gap_history": {}, "stint_history": {}, "lap_times_history": {},
+        "line_count": 0,
+    })
     return {"status": "cleared"}
 
 
 @app.get("/api/live/data")
 def get_live_data():
-    f = _get_live_file()
-    if not f.exists() or f.stat().st_size == 0:
-        return {"timing": [], "weather": None, "raceControl": [], "dataPoints": 0}
-
-    lines = f.read_text().strip().split("\n")
-
-    timing = {}  # latest per driver
-    weather = None
-    race_control = []
-    car_telemetry = {}  # latest telemetry per driver from CarData.z
-    telemetry_history = {}  # per driver: list of recent telemetry snapshots (last 50)
-    positions = {}  # latest X/Y per driver from Position.z
-    gap_history = {}  # per driver: list of {lap, gap} for gap evolution chart
-    stint_history = {}  # per driver: list of {compound, startLap, endLap} for tyre timeline
-    lap_times_history = {}  # per driver: list of {lap, time} for pace analysis
-
     import ast
     import base64
     import zlib
 
-    for line in lines:
+    f = _get_live_file()
+    if not f.exists() or f.stat().st_size == 0:
+        return {"timing": [], "weather": None, "raceControl": [], "dataPoints": 0}
+
+    # ── Incremental parsing: only read new bytes since last call ──
+    cache = _live_parse_cache
+    file_size = f.stat().st_size
+    file_str = str(f)
+
+    # If same file and no new data, return cached result
+    if cache["file"] == file_str and cache["offset"] >= file_size and cache["result"] is not None:
+        return cache["result"]
+
+    # If different file, reset cache
+    if cache["file"] != file_str:
+        cache["file"] = file_str
+        cache["offset"] = 0
+        cache["timing"] = {}
+        cache["weather"] = None
+        cache["race_control"] = []
+        cache["car_telemetry"] = {}
+        cache["telemetry_history"] = {}
+        cache["positions"] = {}
+        cache["gap_history"] = {}
+        cache["stint_history"] = {}
+        cache["lap_times_history"] = {}
+        cache["line_count"] = 0
+
+    # Read only new bytes
+    with open(f, "r") as fh:
+        if cache["offset"] == 0:
+            # Cold start: only parse last ~3000 lines for speed
+            # (current driver state only needs recent messages)
+            all_text = fh.read()
+            all_lines = all_text.split("\n")
+            cache["line_count"] = len(all_lines)
+            # Take the last 3000 lines (enough for current state)
+            new_lines = all_lines[-3000:] if len(all_lines) > 3000 else all_lines
+            new_offset = len(all_text.encode("utf-8", errors="replace"))
+        else:
+            fh.seek(cache["offset"])
+            new_data = fh.read()
+            new_offset = fh.tell()
+            if not new_data.strip() and cache["result"] is not None:
+                return cache["result"]
+            new_lines = new_data.strip().split("\n") if new_data.strip() else []
+            cache["line_count"] += len(new_lines)
+
+    cache["offset"] = new_offset
+
+    # Use cached accumulators
+    timing = cache["timing"]
+    weather = cache["weather"]
+    race_control = cache["race_control"]
+    car_telemetry = cache["car_telemetry"]
+    telemetry_history = cache["telemetry_history"]
+    positions = cache["positions"]
+    gap_history = cache["gap_history"]
+    stint_history = cache["stint_history"]
+    lap_times_history = cache["lap_times_history"]
+
+    for line in new_lines:
         try:
             if not line.startswith("["):
                 continue
@@ -2233,6 +2768,7 @@ def get_live_data():
                     "windSpeed": data.get("WindSpeed"),
                     "windDir": data.get("WindDirection"),
                 }
+                cache["weather"] = weather
 
             elif cat == "RaceControlMessages" and isinstance(data, dict):
                 messages = data.get("Messages", {})
@@ -2591,11 +3127,11 @@ def get_live_data():
         if drv_num in lap_times_history:
             pace_data[drv_name] = lap_times_history[drv_num]
 
-    return {
+    result = {
         "timing": timing_list,
         "weather": weather,
         "raceControl": race_control[-20:],
-        "dataPoints": len(lines),
+        "dataPoints": cache["line_count"],
         "scStatus": sc_active,
         "alerts": alerts,
         "positions": positions,
@@ -2603,6 +3139,10 @@ def get_live_data():
         "stintTimeline": stint_timeline,
         "paceData": pace_data,
     }
+
+    # Cache the result for subsequent calls with no new data
+    cache["result"] = result
+    return result
 
 
 def _detect_clipping_patterns(history: list[dict]) -> list[dict]:

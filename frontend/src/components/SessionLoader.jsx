@@ -73,18 +73,21 @@ export default function SessionLoader({ onLoaded }) {
 
       {error && <p className="text-red-400 text-xs mt-2">{error}</p>}
 
-      <button
-        onClick={handleLoad}
-        disabled={loading || !gp}
-        className="w-full mt-4 bg-f1-red hover:bg-red-700 disabled:opacity-50 text-white font-semibold py-2.5 rounded-lg transition-all duration-200 text-sm"
-      >
-        {loading ? "Loading session..." : "Load Session"}
-      </button>
-
-      {loading && (
-        <p className="text-f1-muted text-xs mt-2 text-center">
-          First load downloads from F1 API (~30-60s). Cached after that.
-        </p>
+      {!loading ? (
+        <button
+          onClick={handleLoad}
+          disabled={!gp}
+          className="w-full mt-4 bg-f1-red hover:bg-red-700 disabled:opacity-50 text-white font-semibold py-2.5 rounded-lg transition-all duration-200 text-sm"
+        >
+          Load Session
+        </button>
+      ) : (
+        <div className="mt-4">
+          <LoadingSpinner text={`Loading ${gp}...`} />
+          <p className="text-f1-muted text-xs text-center -mt-2">
+            First load downloads from F1 API (~30-60s). Cached after that.
+          </p>
+        </div>
       )}
     </div>
   );

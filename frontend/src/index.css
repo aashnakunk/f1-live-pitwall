@@ -116,3 +116,29 @@ body {
   background: rgba(225, 6, 0, 0.1);
   border-color: rgba(225, 6, 0, 0.3);
 }
+
+/* Neon red streak animation — sweeps horizontally */
+@keyframes neon-sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200vw); }
+}
+.neon-streak {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 30vw;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #E10600, #ff4444, #E10600, transparent);
+  box-shadow: 0 0 15px #E1060080, 0 0 40px #E1060040;
+  animation: neon-sweep 4s ease-in-out infinite;
+}
+
+/* F1 car loading track animation */
+@keyframes car-drive {
+  0% { offset-distance: 0%; }
+  100% { offset-distance: 100%; }
+}
+.f1-car-loading {
+  offset-rotate: auto;
+  animation: car-drive 3s linear infinite;
+}

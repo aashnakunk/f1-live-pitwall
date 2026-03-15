@@ -31,12 +31,10 @@ export default function Layout() {
           onClick={() => navigate("/")}
           className="flex items-center gap-2 px-5 py-5 border-b border-white/5 hover:bg-white/5 transition"
         >
-          <div className="w-8 h-8 rounded-lg bg-f1-red flex items-center justify-center">
-            <Home size={16} className="text-white" />
-          </div>
-          <div>
-            <span className="text-sm font-bold text-white tracking-tight">F1 PIT WALL</span>
-          </div>
+          <span className="text-sm font-extrabold tracking-tight">
+            <span className="text-f1-red">F1</span>
+            <span className="text-white ml-1">Telemetry Lab</span>
+          </span>
         </button>
 
         {/* Nav links */}
