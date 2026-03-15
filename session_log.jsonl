@@ -199,3 +199,85 @@
 {"type": "ers_estimate", "driver": "NOR", "driverNumber": "1", "estErsUsage": 1.0, "logged_at": "2026-03-14T07:41:51.293155+00:00"}
 {"type": "ers_estimate", "driver": "NOR", "driverNumber": "1", "estErsUsage": 0.923, "logged_at": "2026-03-14T07:42:08.580003+00:00"}
 {"type": "ers_estimate", "driver": "NOR", "driverNumber": "1", "estErsUsage": 0.833, "logged_at": "2026-03-14T07:42:11.578479+00:00"}
+{"type": "pattern_detected", "driver": "GAS", "driverNumber": "10", "team": "Alpine", "pattern": "ENERGY_SAVING", "confidence": 1.0, "description": "Energy saving mode: acceleration dropped 100% in recent samples vs earlier in stint", "logged_at": "2026-03-15T07:05:28.511442+00:00"}
+{"type": "pattern_detected", "driver": "ANT", "driverNumber": "12", "team": "Mercedes", "pattern": "LIFT_COAST", "confidence": 0.23, "description": "Lift-and-coast detected: throttle < 50% with no braking at speed > 200 in 14 samples", "logged_at": "2026-03-15T07:29:34.931614+00:00"}
+{"type": "pattern_detected", "driver": "ANT", "driverNumber": "12", "team": "Mercedes", "pattern": "ENERGY_SAVING", "confidence": 0.33, "description": "Energy saving mode: acceleration dropped 33% in recent samples vs earlier in stint", "logged_at": "2026-03-15T07:29:34.944881+00:00"}
+{"type": "ers_estimate", "driver": "ANT", "driverNumber": "12", "estErsUsage": 0.582, "logged_at": "2026-03-15T07:29:34.948885+00:00"}
+{"type": "peak_speed", "driver": "ANT", "driverNumber": "12", "speed": 323, "logged_at": "2026-03-15T07:29:34.949520+00:00"}
+{"type": "ers_estimate", "driver": "HAM", "driverNumber": "44", "estErsUsage": 0.567, "logged_at": "2026-03-15T07:29:36.085527+00:00"}
+{"type": "peak_speed", "driver": "HAM", "driverNumber": "44", "speed": 328, "logged_at": "2026-03-15T07:29:36.098229+00:00"}
+{"type": "pattern_detected", "driver": "ANT", "driverNumber": "12", "team": "Mercedes", "pattern": "CLIPPING", "confidence": 0.69, "description": "Battery clipping detected: speed not increasing despite full throttle in 24/52 high-speed samples", "logged_at": "2026-03-15T07:29:38.119537+00:00"}
+{"type": "ers_estimate", "driver": "ANT", "driverNumber": "12", "estErsUsage": 0.494, "logged_at": "2026-03-15T07:29:38.136371+00:00"}
+{"type": "pattern_detected", "driver": "HAM", "driverNumber": "44", "team": "Ferrari", "pattern": "CLIPPING", "confidence": 0.46, "description": "Battery clipping detected: speed not increasing despite full throttle in 13/42 high-speed samples", "logged_at": "2026-03-15T07:29:38.136176+00:00"}
+{"type": "ers_estimate", "driver": "HAM", "driverNumber": "44", "estErsUsage": 0.5, "logged_at": "2026-03-15T07:29:38.153319+00:00"}
+{"type": "peak_speed", "driver": "HAM", "driverNumber": "44", "speed": 330, "logged_at": "2026-03-15T07:29:38.156025+00:00"}
+{"type": "pattern_detected", "driver": "HAM", "driverNumber": "44", "team": "Ferrari", "pattern": "ENERGY_SAVING", "confidence": 0.48, "description": "Energy saving mode: acceleration dropped 48% in recent samples vs earlier in stint", "logged_at": "2026-03-15T07:29:40.139414+00:00"}
+{"type": "ers_estimate", "driver": "HAM", "driverNumber": "44", "estErsUsage": 0.422, "logged_at": "2026-03-15T07:29:42.130571+00:00"}
+{"type": "ers_estimate", "driver": "ANT", "driverNumber": "12", "estErsUsage": 0.442, "logged_at": "2026-03-15T07:29:46.432107+00:00"}
+{"type": "ers_estimate", "driver": "ANT", "driverNumber": "12", "estErsUsage": 0.342, "logged_at": "2026-03-15T07:30:15.013768+00:00"}
+{"type": "peak_speed", "driver": "ANT", "driverNumber": "12", "speed": 319, "logged_at": "2026-03-15T07:30:31.005855+00:00"}
+{"type": "pattern_detected", "driver": "HAM", "driverNumber": "44", "team": "Ferrari", "pattern": "LIFT_COAST", "confidence": 0.03, "description": "Lift-and-coast detected: throttle < 50% with no braking at speed > 200 in 2 samples", "logged_at": "2026-03-15T07:30:37.018703+00:00"}
+{"type": "peak_speed", "driver": "ANT", "driverNumber": "12", "speed": 275, "logged_at": "2026-03-15T07:30:37.018244+00:00"}
+{"type": "peak_speed", "driver": "HAM", "driverNumber": "44", "speed": 315, "logged_at": "2026-03-15T07:30:37.039448+00:00"}
+{"type": "pattern_detected", "driver": "LEC", "driverNumber": "16", "team": "Ferrari", "pattern": "CLIPPING", "confidence": 0.71, "description": "Battery clipping detected: speed not increasing despite full throttle in 17/36 high-speed samples", "logged_at": "2026-03-15T07:30:56.915001+00:00"}
+{"type": "pattern_detected", "driver": "LEC", "driverNumber": "16", "team": "Ferrari", "pattern": "LIFT_COAST", "confidence": 0.07, "description": "Lift-and-coast detected: throttle < 50% with no braking at speed > 200 in 4 samples", "logged_at": "2026-03-15T07:30:56.933341+00:00"}
+{"type": "ers_estimate", "driver": "LEC", "driverNumber": "16", "estErsUsage": 0.313, "logged_at": "2026-03-15T07:30:56.933595+00:00"}
+{"type": "peak_speed", "driver": "LEC", "driverNumber": "16", "speed": 321, "logged_at": "2026-03-15T07:30:56.933729+00:00"}
+{"type": "pattern_detected", "driver": "RUS", "driverNumber": "63", "team": "Mercedes", "pattern": "LIFT_COAST", "confidence": 0.07, "description": "Lift-and-coast detected: throttle < 50% with no braking at speed > 200 in 4 samples", "logged_at": "2026-03-15T07:30:58.614917+00:00"}
+{"type": "pattern_detected", "driver": "RUS", "driverNumber": "63", "team": "Mercedes", "pattern": "ENERGY_SAVING", "confidence": 0.37, "description": "Energy saving mode: acceleration dropped 37% in recent samples vs earlier in stint", "logged_at": "2026-03-15T07:30:58.629193+00:00"}
+{"type": "ers_estimate", "driver": "RUS", "driverNumber": "63", "estErsUsage": 0.397, "logged_at": "2026-03-15T07:30:58.629826+00:00"}
+{"type": "peak_speed", "driver": "RUS", "driverNumber": "63", "speed": 307, "logged_at": "2026-03-15T07:30:58.630288+00:00"}
+{"type": "peak_speed", "driver": "HAM", "driverNumber": "44", "speed": 293, "logged_at": "2026-03-15T07:31:00.696602+00:00"}
+{"type": "pattern_detected", "driver": "LEC", "driverNumber": "16", "team": "Ferrari", "pattern": "ENERGY_SAVING", "confidence": 0.37, "description": "Energy saving mode: acceleration dropped 37% in recent samples vs earlier in stint", "logged_at": "2026-03-15T07:31:00.690441+00:00"}
+{"type": "pattern_detected", "driver": "VER", "driverNumber": "3", "team": "Red Bull Racing", "pattern": "CLIPPING", "confidence": 0.64, "description": "Battery clipping detected: speed not increasing despite full throttle in 9/21 high-speed samples", "logged_at": "2026-03-15T07:31:02.202843+00:00"}
+{"type": "pattern_detected", "driver": "VER", "driverNumber": "3", "team": "Red Bull Racing", "pattern": "LIFT_COAST", "confidence": 0.2, "description": "Lift-and-coast detected: throttle < 50% with no braking at speed > 200 in 12 samples", "logged_at": "2026-03-15T07:31:02.214248+00:00"}
+{"type": "pattern_detected", "driver": "VER", "driverNumber": "3", "team": "Red Bull Racing", "pattern": "ENERGY_SAVING", "confidence": 0.35, "description": "Energy saving mode: acceleration dropped 35% in recent samples vs earlier in stint", "logged_at": "2026-03-15T07:31:02.214490+00:00"}
+{"type": "ers_estimate", "driver": "VER", "driverNumber": "3", "estErsUsage": 0.379, "logged_at": "2026-03-15T07:31:02.214566+00:00"}
+{"type": "peak_speed", "driver": "VER", "driverNumber": "3", "speed": 310, "logged_at": "2026-03-15T07:31:02.214693+00:00"}
+{"type": "peak_speed", "driver": "HAM", "driverNumber": "44", "speed": 277, "logged_at": "2026-03-15T07:31:04.262435+00:00"}
+{"type": "peak_speed", "driver": "LEC", "driverNumber": "16", "speed": 270, "logged_at": "2026-03-15T07:31:04.292338+00:00"}
+{"type": "ers_estimate", "driver": "RUS", "driverNumber": "63", "estErsUsage": 0.469, "logged_at": "2026-03-15T07:31:04.310163+00:00"}
+{"type": "peak_speed", "driver": "VER", "driverNumber": "3", "speed": 301, "logged_at": "2026-03-15T07:31:04.329160+00:00"}
+{"type": "ers_estimate", "driver": "LEC", "driverNumber": "16", "estErsUsage": 0.355, "logged_at": "2026-03-15T07:31:06.273171+00:00"}
+{"type": "peak_speed", "driver": "ANT", "driverNumber": "12", "speed": 296, "logged_at": "2026-03-15T07:31:08.238159+00:00"}
+{"type": "peak_speed", "driver": "HAM", "driverNumber": "44", "speed": 280, "logged_at": "2026-03-15T07:31:08.257621+00:00"}
+{"type": "ers_estimate", "driver": "HAM", "driverNumber": "44", "estErsUsage": 0.654, "logged_at": "2026-03-15T07:31:10.268327+00:00"}
+{"type": "peak_speed", "driver": "LEC", "driverNumber": "16", "speed": 317, "logged_at": "2026-03-15T07:31:12.268286+00:00"}
+{"type": "peak_speed", "driver": "LEC", "driverNumber": "16", "speed": 345, "logged_at": "2026-03-15T07:31:14.263397+00:00"}
+{"type": "peak_speed", "driver": "RUS", "driverNumber": "63", "speed": 314, "logged_at": "2026-03-15T07:31:14.299732+00:00"}
+{"type": "peak_speed", "driver": "RUS", "driverNumber": "63", "speed": 328, "logged_at": "2026-03-15T07:31:16.302540+00:00"}
+{"type": "peak_speed", "driver": "RUS", "driverNumber": "63", "speed": 332, "logged_at": "2026-03-15T07:31:18.308090+00:00"}
+{"type": "peak_speed", "driver": "VER", "driverNumber": "3", "speed": 321, "logged_at": "2026-03-15T07:31:18.322751+00:00"}
+{"type": "pattern_detected", "driver": "RUS", "driverNumber": "63", "team": "Mercedes", "pattern": "CLIPPING", "confidence": 0.5, "description": "Battery clipping detected: speed not increasing despite full throttle in 15/45 high-speed samples", "logged_at": "2026-03-15T07:31:20.324202+00:00"}
+{"type": "ers_estimate", "driver": "VER", "driverNumber": "3", "estErsUsage": 0.326, "logged_at": "2026-03-15T07:31:22.446335+00:00"}
+{"type": "ers_estimate", "driver": "RUS", "driverNumber": "63", "estErsUsage": 0.344, "logged_at": "2026-03-15T07:31:26.902989+00:00"}
+{"type": "ers_estimate", "driver": "LEC", "driverNumber": "16", "estErsUsage": 0.478, "logged_at": "2026-03-15T07:31:34.332053+00:00"}
+{"type": "peak_speed", "driver": "LEC", "driverNumber": "16", "speed": 333, "logged_at": "2026-03-15T07:32:12.272869+00:00"}
+{"type": "ers_estimate", "driver": "VER", "driverNumber": "3", "estErsUsage": 0.489, "logged_at": "2026-03-15T07:32:16.867376+00:00"}
+{"type": "peak_speed", "driver": "LEC", "driverNumber": "16", "speed": 303, "logged_at": "2026-03-15T07:32:38.355367+00:00"}
+{"type": "peak_speed", "driver": "LEC", "driverNumber": "16", "speed": 266, "logged_at": "2026-03-15T07:32:40.283570+00:00"}
+{"type": "peak_speed", "driver": "ANT", "driverNumber": "12", "speed": 286, "logged_at": "2026-03-15T07:32:44.230883+00:00"}
+{"type": "peak_speed", "driver": "VER", "driverNumber": "3", "speed": 276, "logged_at": "2026-03-15T07:32:44.316026+00:00"}
+{"type": "peak_speed", "driver": "HAM", "driverNumber": "44", "speed": 304, "logged_at": "2026-03-15T07:32:46.267681+00:00"}
+{"type": "ers_estimate", "driver": "RUS", "driverNumber": "63", "estErsUsage": 0.554, "logged_at": "2026-03-15T07:32:46.308407+00:00"}
+{"type": "peak_speed", "driver": "VER", "driverNumber": "3", "speed": 330, "logged_at": "2026-03-15T07:32:56.652736+00:00"}
+{"type": "peak_speed", "driver": "RUS", "driverNumber": "63", "speed": 296, "logged_at": "2026-03-15T07:36:17.306231+00:00"}
+{"type": "peak_speed", "driver": "ANT", "driverNumber": "12", "speed": 309, "logged_at": "2026-03-15T07:36:47.178474+00:00"}
+{"type": "peak_speed", "driver": "LEC", "driverNumber": "16", "speed": 295, "logged_at": "2026-03-15T08:02:48.391702+00:00"}
+{"type": "peak_speed", "driver": "RUS", "driverNumber": "63", "speed": 261, "logged_at": "2026-03-15T08:03:17.148068+00:00"}
+{"type": "peak_speed", "driver": "LEC", "driverNumber": "16", "speed": 258, "logged_at": "2026-03-15T08:03:17.190776+00:00"}
+{"type": "ers_estimate", "driver": "RUS", "driverNumber": "63", "estErsUsage": 0.241, "logged_at": "2026-03-15T08:03:19.152904+00:00"}
+{"type": "ers_estimate", "driver": "LEC", "driverNumber": "16", "estErsUsage": 0.242, "logged_at": "2026-03-15T08:03:21.179380+00:00"}
+{"type": "peak_speed", "driver": "RUS", "driverNumber": "63", "speed": 278, "logged_at": "2026-03-15T08:03:25.172734+00:00"}
+{"type": "ers_estimate", "driver": "VER", "driverNumber": "3", "estErsUsage": 0.574, "logged_at": "2026-03-15T08:03:50.926516+00:00"}
+{"type": "peak_speed", "driver": "VER", "driverNumber": "3", "speed": 267, "logged_at": "2026-03-15T08:03:50.939216+00:00"}
+{"type": "peak_speed", "driver": "VER", "driverNumber": "3", "speed": 291, "logged_at": "2026-03-15T08:03:53.371315+00:00"}
+{"type": "ers_estimate", "driver": "HAM", "driverNumber": "44", "estErsUsage": 0.339, "logged_at": "2026-03-15T08:04:01.073014+00:00"}
+{"type": "ers_estimate", "driver": "ANT", "driverNumber": "12", "estErsUsage": 0.233, "logged_at": "2026-03-15T08:04:05.230660+00:00"}
+{"type": "peak_speed", "driver": "HAM", "driverNumber": "44", "speed": 267, "logged_at": "2026-03-15T08:04:33.085695+00:00"}
+{"type": "peak_speed", "driver": "ANT", "driverNumber": "12", "speed": 264, "logged_at": "2026-03-15T08:04:41.036088+00:00"}
+{"type": "peak_speed", "driver": "RUS", "driverNumber": "63", "speed": 254, "logged_at": "2026-03-15T08:04:47.065451+00:00"}
+{"type": "peak_speed", "driver": "HAM", "driverNumber": "44", "speed": 251, "logged_at": "2026-03-15T08:04:51.063253+00:00"}
+{"type": "peak_speed", "driver": "ANT", "driverNumber": "12", "speed": 254, "logged_at": "2026-03-15T08:06:15.031468+00:00"}
+{"type": "ers_estimate", "driver": "HAM", "driverNumber": "44", "estErsUsage": 0.247, "logged_at": "2026-03-15T08:06:37.057583+00:00"}
+{"type": "peak_speed", "driver": "VER", "driverNumber": "3", "speed": 281, "logged_at": "2026-03-15T08:07:07.138419+00:00"}

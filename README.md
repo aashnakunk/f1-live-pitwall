@@ -1,6 +1,6 @@
-# F1 telemetry dashboard
+# F1 Telemetry Lab
 
-A full-stack Formula 1 race engineer dashboard built with **FastF1**, **FastAPI**, and **React**. Load any historical F1 session and explore telemetry, strategy, energy modeling, and AI-powered race analysis through a glassmorphism dark UI.
+A full-stack Formula 1 race engineer dashboard built with **FastF1**, **FastAPI**, and **React**. Load any historical session or connect to live timing — explore telemetry, strategy, energy modeling, race replay, and AI-powered analysis through a dark glassmorphism UI.
 
 ![React](https://img.shields.io/badge/React-19-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green)
@@ -12,27 +12,33 @@ A full-stack Formula 1 race engineer dashboard built with **FastF1**, **FastAPI*
 ## Features
 
 ### Race Command Center
-Session overview with race results, tyre strategy timeline, weather conditions, and race metrics (SC/VSC count, DNFs, pit stops, fastest lap).
+Session overview with race results, tyre strategy timeline, weather conditions, and key race metrics (SC/VSC count, DNFs, pit stops, fastest lap).
 
 ### Telemetry Lab
-Multi-driver telemetry comparison — select any number of drivers and overlay their speed, throttle, and brake traces. Circuit track map with color-by-speed/throttle/brake/zone modes, auto-detected corner markers, and driver tabs.
+Multi-driver telemetry comparison — overlay speed, throttle, and brake traces for any combination of drivers. Circuit map with color-by-speed/throttle/brake/zone modes, auto-detected corner markers, and animated driver trail overlays.
 
 ### Performance Studio
-Lap time evolution with SC/VSC overlay, tyre degradation analysis (slope + R-squared per stint), tyre life predictions, pace-adjusted standings, and overtake scoring.
+Lap time evolution with SC/VSC shading, tyre degradation analysis (slope + R² per stint), tyre life predictions, fuel-corrected lap times, pace-adjusted standings, and overtake probability scoring.
 
 ### Pit Strategy
 Stint timeline visualization, pit stop details (duration, compound changes), undercut/overcut detection comparing position swaps around pit windows, and safety car event mapping.
 
 ### Energy Map
-Braking zone analysis, energy harvest/deploy modeling (350kW MGU-K, 4MJ battery — 2026 regs), battery state-of-charge trace, clipping/regen-clip detection, and circuit energy overlay.
+Braking zone analysis, energy harvest/deploy modeling (350kW MGU-K, 4MJ battery — 2026 regulation profiles), battery state-of-charge trace, clipping/regen-clip detection, circuit energy overlay, and ERS status gauges.
+
+### Circuit Lab
+Interactive circuit visualization with track outlines, DRS zones, sector markers, and speed/throttle/brake heatmap overlays. Supports all circuits in the F1 calendar.
 
 ### Race Replay
-Lap-by-lap race simulation with a win probability model that only uses data available up to the current lap — no peeking at results. Includes a **prediction accuracy panel** showing winner correctness, podium overlap, and pairwise order accuracy vs actual results. Scrub through the race to watch the model converge.
+Lap-by-lap race simulation with animated circuit map — drivers move around the track with broadcast-style markers (dot + stick + name badge). Gap-based position offsets, pit and lapped-car indicators. Win probability model uses only data available up to the current lap. Prediction accuracy panel with winner correctness, podium overlap, and pairwise order accuracy. Full-race accuracy sweep to see when the model locks onto the correct winner.
+
+### Compare GP
+Multi-session and cross-Grand-Prix comparison. Compare driver performance, lap times, and strategies across different race weekends.
 
 ### Live Pit Wall
-Real-time F1 timing via SignalR stream. SC/VSC-aware win probability model with strategy alerts (MISSED_OPPORTUNITY, SMART_PIT, TYRE_CLIFF).
+Real-time F1 timing via SignalR stream with incremental data parsing for fast updates. Driver cards with sector times, tyre info, gap tracking, and zone-level telemetry. SC/VSC-aware strategy alerts (MISSED_OPPORTUNITY, SMART_PIT, TYRE_CLIFF).
 
-### AI Debrief Agent
+### AI Debrief
 Claude-powered post-race analysis. Generates a race engineer-style debrief with key moments, strategy breakdowns, and next-race predictions.
 
 ---
@@ -43,8 +49,8 @@ Claude-powered post-race analysis. Generates a race engineer-style debrief with 
 |-------|------|
 | **Backend** | Python, FastAPI, FastF1, NumPy, SciPy, Pandas |
 | **Frontend** | React 19, Vite, Tailwind CSS, Plotly.js, Framer Motion, Lucide Icons |
-| **AI** | Anthropic Claude API (Sonnet) |
-| **Data** | F1 official timing data via FastF1 (cached locally) |
+| **AI** | Anthropic Claude API |
+| **Data** | F1 official timing via FastF1 (cached locally) |
 
 ---
 
@@ -57,16 +63,15 @@ Claude-powered post-race analysis. Generates a race engineer-style debrief with 
 ### Setup
 
 ```bash
-# Clone the repo
 git clone <your-repo-url>
 cd f1_dashboard
 
-# Python backend
+# Backend
 python3 -m venv venv
 source venv/bin/activate
 pip install fastapi uvicorn fastf1 numpy scipy pandas anthropic
 
-# React frontend
+# Frontend
 cd frontend
 npm install
 cd ..
@@ -79,11 +84,9 @@ chmod +x start.sh
 ./start.sh
 ```
 
-This starts both servers:
 - **Frontend:** http://localhost:3000
 - **Backend:** http://localhost:8000
 
-To stop:
 ```bash
 ./start.sh stop
 ```
@@ -91,29 +94,40 @@ To stop:
 ### Usage
 
 1. Open http://localhost:3000
-2. Select a year, Grand Prix, and session type (Race, Qualifying, etc.)
-3. Click **Load Session** — first load downloads data from F1 servers (~10-30s), subsequent loads are instant from cache
-4. Navigate to any dashboard page
+2. Select a year, Grand Prix, and session type
+3. Click **Load Session** — first load downloads from F1 servers (~10-30s), subsequent loads are cached
+4. Navigate to any page from the sidebar
 
 ---
 
-## API Endpoints
+## API
 
 | Endpoint | Description |
 |----------|-------------|
-| `POST /api/session/load` | Load an F1 session (year, GP, type) |
-| `GET /api/session/overview` | Race results, weather, strategy, metrics |
+| `POST /api/session/load` | Load an F1 session |
+| `GET /api/session/overview` | Results, weather, strategy, metrics |
 | `GET /api/session/drivers` | Driver list with team colors |
-| `GET /api/session/telemetry?d1=VER&d2=HAM` | Two-driver telemetry comparison |
-| `GET /api/session/telemetry/multi?drivers=VER,HAM,NOR` | Multi-driver telemetry |
-| `GET /api/session/laptimes` | Lap times, degradation, SC/VSC events |
-| `GET /api/session/predictions?threshold=1.5` | Tyre life, pace-adjusted standings, overtake scores |
-| `GET /api/session/energy?driver=VER` | Energy harvest/deploy model + braking zones |
-| `GET /api/session/trackmap?driver=VER` | Circuit X/Y with speed/throttle/brake overlay |
-| `GET /api/session/pitstrategy` | Pit stops, stints, undercut/overcut, SC events |
-| `GET /api/session/replay?lap=30` | Replay standings + win probability at given lap |
-| `POST /api/session/debrief` | AI-generated race debrief (requires Anthropic API key) |
-| `GET /api/live/data` | Live timing data from SignalR stream |
+| `GET /api/session/telemetry/multi` | Multi-driver telemetry |
+| `GET /api/session/laptimes` | Lap times, degradation, SC/VSC |
+| `GET /api/session/predictions` | Tyre life, pace-adjusted standings |
+| `GET /api/session/energy` | Energy harvest/deploy model |
+| `GET /api/session/trackmap` | Circuit with speed/throttle/brake overlay |
+| `GET /api/session/pitstrategy` | Pit stops, stints, undercut/overcut |
+| `GET /api/session/replay` | Replay standings + win probability |
+| `GET /api/session/replay/positions` | Track positions for circuit animation |
+| `GET /api/session/replay/sweep` | Full-race accuracy sweep |
+| `GET /api/session/circuit` | Circuit data |
+| `GET /api/session/overtake-probability` | Overtake scoring |
+| `POST /api/session/debrief` | AI race debrief |
+| `POST /api/session/chat` | Chat with AI about the session |
+| `GET /api/live/data` | Live timing data |
+| `GET /api/live/status` | Live stream status |
+| `POST /api/live/start` | Start live recording |
+| `POST /api/live/stop` | Stop live recording |
+| `GET /api/live/driver/{n}` | Live driver detail |
+| `GET /api/live/driver/{n}/zones` | Live driver braking zones |
+| `GET /api/compare` | Multi-session comparison |
+| `GET /api/events/{year}` | F1 calendar events |
 
 ---
 
@@ -122,41 +136,43 @@ To stop:
 ```
 f1_dashboard/
   backend/
-    main.py          # All FastAPI endpoints
-  frontend/
-    src/
-      pages/
-        Home.jsx           # Session loader + navigation
-        RaceCommand.jsx    # Results, metrics, weather, strategy
-        TelemetryLab.jsx   # Multi-driver telemetry comparison
-        PerformanceLab.jsx # Lap times, degradation, predictions
-        PitStrategy.jsx    # Pit stops, undercut/overcut
-        EnergyMap.jsx      # Energy harvest/deploy modeling
-        RaceReplay.jsx     # Lap-by-lap replay + accuracy
-        LivePitWall.jsx    # Real-time timing
-        AIDebrief.jsx      # Claude-powered analysis
-      components/
-        Layout.jsx         # Sidebar navigation
-        GlassCard.jsx      # Glassmorphism card component
-        SessionGate.jsx    # Ensures session is loaded
-        PageHeader.jsx     # Page title component
-        LoadingSpinner.jsx # Loading state
-        SessionLoader.jsx  # Year/GP/session picker
-      hooks/
-        useApi.js          # Fetch wrapper with error handling
-  cache/                   # FastF1 data cache (auto-created)
-  start.sh                 # Start/stop both servers
-  requirements.txt         # Python dependencies
+    main.py              # FastAPI endpoints
+  frontend/src/
+    pages/
+      Home.jsx           # Session loader + grouped navigation
+      RaceCommand.jsx    # Results, metrics, weather
+      TelemetryLab.jsx   # Multi-driver telemetry
+      PerformanceLab.jsx # Lap times, degradation
+      PitStrategy.jsx    # Pit stops, undercut/overcut
+      EnergyMap.jsx      # Energy modeling (2026 regs)
+      CircuitLab.jsx     # Circuit visualization
+      RaceReplay.jsx     # Lap-by-lap replay
+      CompareGP.jsx      # Cross-session comparison
+      LivePitWall.jsx    # Real-time timing
+      AIDebrief.jsx      # Claude analysis
+    components/
+      Layout.jsx         # Sidebar navigation
+      CircuitSVG.jsx     # SVG circuit renderer
+      GlassCard.jsx      # Glassmorphism card
+      SessionGate.jsx    # Session guard
+      PageHeader.jsx     # Page header
+      LoadingSpinner.jsx # F1 car loading animation
+      SessionLoader.jsx  # Year/GP/session picker
+    hooks/
+      useApi.js          # Fetch wrapper
+  cache/                 # FastF1 data cache
+  start.sh               # Start/stop script
 ```
 
 ---
 
 ## Notes
 
-- **Data caching:** FastF1 caches session data locally in `cache/`. First load of a session hits F1 servers; after that it's instant from disk.
-- **AI Debrief:** Requires an Anthropic API key entered in the UI. Uses Claude Sonnet for race analysis.
-- **Live timing:** The Live Pit Wall connects to F1's SignalR stream during live sessions. Works best during actual race weekends.
-- **Win probability model:** Uses position, gap, tyre age, and compound with softmax temperature scaling. SC/VSC-aware — shifts weights to favor tyre freshness when gaps are neutralized.
+- **Caching:** FastF1 caches session data in `cache/`. First load hits F1 servers; subsequent loads are instant.
+- **AI Debrief:** Requires an Anthropic API key entered in the UI.
+- **Live timing:** Connects to F1's SignalR stream during live sessions. Uses incremental parsing for sub-second updates even with large data files.
+- **Win probability:** Position, gap, tyre age, and compound with softmax temperature. SC/VSC-aware — shifts weights toward tyre freshness when gaps are neutralized.
+- **Circuit rendering:** Broadcast-style thick track with Catmull-Rom splines, kerb markings, DRS zones, and driver markers with stick-and-badge labels.
 
 ---
 
