@@ -1603,54 +1603,409 @@ def _gather_chat_context(page: str) -> str:
 
 @app.post("/api/session/chat")
 def chat_with_ai(req: ChatRequest):
-    """Context-aware AI chat about the current session."""
-    context = _gather_chat_context(req.page)
+    """Context-aware AI chat using MCP-style tool calling.
 
-    # Build conversation messages
-    live_rules = ""
-    if req.page == "live":
-        live_rules = """
-- You have LIVE telemetry data from the current session (speed, throttle, brake, gear, RPM per driver).
-- You have per-driver analysis: clipping detection, lift-and-coast, energy saving flags, estimated ERS usage.
-- You have per-zone analysis: which track zones (turns/straights) show clipping or lift-and-coast for each driver.
-- You have pit stop history, tyre stints, gap evolution, and race control messages.
-- ERS estimates are approximate (derived from throttle/acceleration patterns — no actual battery data is public).
-- When asked "where" something happened, reference track zones (Turn 1, Straight 2, etc.).
-- When asked about battery/ERS, be honest that it's estimated, not actual MGU-K data."""
+    Instead of stuffing all data into the system prompt, Claude gets tools
+    to fetch specific data on demand. The response includes which tools
+    were called so you can see exactly what data Claude used.
+    """
+    return _chat_with_tools(req)
+
+
+# ── f1_mcp integration ──────────────────────────────────────────────────────
+# Lazy-import to avoid startup failure if f1_mcp isn't installed yet.
+# Falls back gracefully to the old backend-only tools.
+
+_f1_mcp_mgr = None
+
+
+def _get_f1_mcp_manager():
+    """Get or create the f1_mcp SessionManager, synced with the backend session."""
+    global _f1_mcp_mgr
+    try:
+        from f1_mcp.session import SessionManager as F1MCPSessionManager
+        if _f1_mcp_mgr is None:
+            _f1_mcp_mgr = F1MCPSessionManager(cache_dir=CACHE_DIR)
+        # Sync: attach the backend's current session
+        if _session is not None:
+            _f1_mcp_mgr.attach(_session)
+        return _f1_mcp_mgr
+    except ImportError:
+        return None
+
+
+def _chat_with_tools(req: ChatRequest):
+    """Agentic chat using tool calls — Claude decides what data to fetch."""
+
+    page = req.page
+    is_live = page == "live"
+    mgr = _get_f1_mcp_manager()
+
+    tools = _build_chat_tools(is_live)
+
+    # ── System prompt ────────────────────────────────────────────────────
+    live_notes = ""
+    if is_live:
+        live_notes = """
+You have access to LIVE session tools for real-time timing, telemetry, and driver analysis.
+ERS estimates are approximate (derived from throttle/acceleration patterns — no actual battery data is public).
+When asked "where" something happened, reference track zones (Turn 1, Straight 2, etc.)."""
 
     system_prompt = f"""You are an expert F1 race engineer assistant embedded in a race analysis dashboard.
 You have deep knowledge of Formula 1 strategy, telemetry, tyre management, and race dynamics.
 
-The user is currently viewing the "{req.page}" page of the dashboard.
+The user is currently viewing the "{page}" page of the dashboard.
 
-Here is the session data you have access to:
-{context}
+IMPORTANT: You have tools to fetch session data. Use them to answer questions with real data.
+Call the relevant tool(s) first, then answer based on what the data shows.
+Driver names are fuzzy-matched: "Leclerc", "charles", "LEC" all work.
 
 Rules:
-- Answer questions specifically about this session's data when possible.
+- Use tools to fetch data before answering — don't guess.
 - Be concise but insightful — like a real race engineer briefing.
-- Reference specific drivers, lap numbers, and data points.
-- If asked about something not in the data, say so honestly.
+- Reference specific drivers, lap numbers, and data points from tool results.
 - Use technical F1 terminology where appropriate.
-- Keep responses under 200 words unless the question demands more detail.{live_rules}"""
+- Keep responses under 200 words unless the question demands more detail.{live_notes}"""
 
     messages = []
-    # Include chat history (last 6 messages max for context window)
     for msg in req.history[-6:]:
         messages.append({"role": msg["role"], "content": msg["content"]})
     messages.append({"role": "user", "content": req.question})
 
+    # Track which tools Claude calls (returned to frontend for visibility)
+    tools_called = []
+
     try:
         client = anthropic.Anthropic(api_key=req.apiKey)
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=512,
-            system=system_prompt,
-            messages=messages,
-        )
-        return {"reply": response.content[0].text}
+
+        # ── Agentic tool-calling loop ─────────────────────────────────────
+        max_iterations = 5
+        for _ in range(max_iterations):
+            response = client.messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=1024,
+                system=system_prompt,
+                messages=messages,
+                tools=tools,
+            )
+
+            # If Claude is done (no tool calls), extract text and return
+            if response.stop_reason == "end_turn":
+                text_parts = [b.text for b in response.content if b.type == "text"]
+                return {
+                    "reply": " ".join(text_parts) if text_parts else "No response generated.",
+                    "tools_called": tools_called,
+                }
+
+            # Process tool calls
+            if response.stop_reason == "tool_use":
+                messages.append({"role": "assistant", "content": response.content})
+
+                tool_results = []
+                for block in response.content:
+                    if block.type == "tool_use":
+                        # Log the tool call
+                        tools_called.append({
+                            "tool": block.name,
+                            "input": block.input,
+                        })
+                        result = _execute_chat_tool(block.name, block.input, mgr)
+                        tool_results.append({
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": result,
+                        })
+
+                messages.append({"role": "user", "content": tool_results})
+            else:
+                text_parts = [b.text for b in response.content if b.type == "text"]
+                return {
+                    "reply": " ".join(text_parts) if text_parts else "Unexpected response.",
+                    "tools_called": tools_called,
+                }
+
+        return {
+            "reply": "I needed too many data lookups. Please try a more specific question.",
+            "tools_called": tools_called,
+        }
+
     except Exception as e:
         raise HTTPException(500, f"AI chat error: {str(e)}")
+
+
+def _build_chat_tools(is_live: bool) -> list[dict]:
+    """Build tool definitions — domain-specific names, fuzzy driver input."""
+    tools = [
+        {
+            "name": "race_result",
+            "description": "Get full race classification — who finished where, with positions, teams, grid positions, status, points, and time gaps.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "qualifying_result",
+            "description": "Get qualifying results with Q1/Q2/Q3 times and positions.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "session_summary",
+            "description": "Quick overview of the session: winner, DNFs, total laps, pit stops, fastest lap, weather. Good starting point for general questions.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "list_drivers",
+            "description": "List all drivers in the session with codes, full names, and teams.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "lap_times",
+            "description": "Get lap-by-lap timing data for a specific driver. Includes tyre compound, stint info, and pace statistics. Driver names are fuzzy-matched.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"driver": {"type": "string", "description": "Driver name, code, or number (e.g. 'Leclerc', 'LEC', '16', 'charles')"}},
+                "required": ["driver"],
+            },
+        },
+        {
+            "name": "fastest_laps",
+            "description": "Get the fastest lap set by each driver, ranked. Use for fastest lap comparisons across the field.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"top_n": {"type": "integer", "description": "Number of drivers to return (default 10)"}},
+                "required": [],
+            },
+        },
+        {
+            "name": "pit_stops",
+            "description": "Get pit stop details — when each driver pitted and on which tyre. Omit driver for all drivers.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"driver": {"type": "string", "description": "Driver name/code (optional — omit for all drivers)"}},
+                "required": [],
+            },
+        },
+        {
+            "name": "tire_stints",
+            "description": "Get tyre stint breakdown — compound, start/end lap, stint length per driver. Omit driver for top 10.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"driver": {"type": "string", "description": "Driver name/code (optional — omit for top 10)"}},
+                "required": [],
+            },
+        },
+        {
+            "name": "driver_telemetry",
+            "description": "Get summarized telemetry stats for a driver's lap: top speed, avg speed, throttle %, braking intensity. Defaults to fastest lap.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "driver": {"type": "string", "description": "Driver name, code, or number"},
+                    "lap_number": {"type": "integer", "description": "Specific lap number (omit for fastest lap)"},
+                },
+                "required": ["driver"],
+            },
+        },
+        {
+            "name": "head_to_head",
+            "description": "Compare two drivers across all key metrics: position, pace, pit stops, fastest lap.",
+            "input_schema": {
+                "type": "object",
+                "properties": {
+                    "driver_a": {"type": "string", "description": "First driver — name, code, or number"},
+                    "driver_b": {"type": "string", "description": "Second driver — name, code, or number"},
+                },
+                "required": ["driver_a", "driver_b"],
+            },
+        },
+        {
+            "name": "weather",
+            "description": "Get weather conditions during the session: track temp, air temp, humidity, rainfall.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "get_regulation_info",
+            "description": "Get regulation era info: DRS/active aero rules, MGU-K power (kW), battery capacity (MJ), fuel effect.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "energy_analysis",
+            "description": "Get MGU-K energy harvest/deploy model for a driver: braking zones, regen zones, battery state-of-charge, clipping detection (power-limited), and energy management patterns.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"driver": {"type": "string", "description": "Driver name, code, or number (e.g. 'Verstappen', 'VER', '1')"}},
+                "required": ["driver"],
+            },
+        },
+        {
+            "name": "tyre_predictions",
+            "description": "Get tyre life predictions and pace-adjusted standings. Shows estimated remaining tyre life per driver, projected pit windows, and standings adjusted for SC/VSC effects.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "session_insights",
+            "description": "Get auto-generated race engineer commentary: gap trends, strategy calls, pace comparisons, key moments, and predicted overtakes.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "overtake_probability",
+            "description": "Get overtake likelihood for each consecutive driver pair based on gap, closing speed, tyre delta, DRS/active aero advantage, and energy patterns.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"lap": {"type": "integer", "description": "Specific lap to analyze (omit for final lap)"}},
+                "required": [],
+            },
+        },
+        {
+            "name": "track_evolution",
+            "description": "Get track grip and condition evolution across the session: how lap times, track temp, and grip changed over time. Use when asked about track rubbering in or conditions changing.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+        },
+        {
+            "name": "win_probability",
+            "description": "Get win probability for each driver at a specific lap. Shows how likely each driver was to win at that point in the race. Use for 'when did X lock in the win?' questions.",
+            "input_schema": {
+                "type": "object",
+                "properties": {"lap": {"type": "integer", "description": "Lap number to check probabilities at"}},
+                "required": ["lap"],
+            },
+        },
+    ]
+
+    if is_live:
+        tools.extend([
+            {
+                "name": "get_live_timing",
+                "description": "Get live timing: current standings, gaps, intervals, tyre info, telemetry (speed/throttle/brake), pit stops, stints, weather, race control messages.",
+                "input_schema": {"type": "object", "properties": {}, "required": []},
+            },
+            {
+                "name": "get_live_driver_detail",
+                "description": "Get detailed live data for a specific driver: position history, lap times, telemetry, analysis flags (clipping, lift-coast, ERS).",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"driver_number": {"type": "string", "description": "Car number as string, e.g. '1' for Verstappen"}},
+                    "required": ["driver_number"],
+                },
+            },
+            {
+                "name": "get_live_driver_zones",
+                "description": "Get per-track-zone analysis for a live driver: clipping %, lift-coast count, ERS estimate per corner/straight.",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"driver_number": {"type": "string", "description": "Car number as string, e.g. '1'"}},
+                    "required": ["driver_number"],
+                },
+            },
+        ])
+
+    return tools
+
+
+def _execute_chat_tool(tool_name: str, tool_input: dict, mgr) -> str:
+    """Execute a tool call — uses f1_mcp if available, falls back to backend."""
+    try:
+        # ── f1_mcp-powered tools (with fuzzy driver normalization) ────────
+        if mgr is not None and mgr.is_loaded:
+            if tool_name == "race_result":
+                return json.dumps(mgr.race_result(), default=str)
+            elif tool_name == "qualifying_result":
+                return json.dumps(mgr.qualifying_result(), default=str)
+            elif tool_name == "session_summary":
+                return json.dumps(mgr.session_summary(), default=str)
+            elif tool_name == "list_drivers":
+                return json.dumps(mgr.drivers(), default=str)
+            elif tool_name == "lap_times":
+                return json.dumps(mgr.lap_times(tool_input.get("driver", "")), default=str)
+            elif tool_name == "fastest_laps":
+                return json.dumps(mgr.fastest_laps(tool_input.get("top_n", 10)), default=str)
+            elif tool_name == "pit_stops":
+                drv = tool_input.get("driver", "") or None
+                return json.dumps(mgr.pit_stops(drv), default=str)
+            elif tool_name == "tire_stints":
+                drv = tool_input.get("driver", "") or None
+                return json.dumps(mgr.tire_stints(drv), default=str)
+            elif tool_name == "driver_telemetry":
+                lap = tool_input.get("lap_number", 0)
+                return json.dumps(mgr.driver_telemetry(tool_input["driver"], lap if lap > 0 else None), default=str)
+            elif tool_name == "head_to_head":
+                return json.dumps(mgr.head_to_head(tool_input["driver_a"], tool_input["driver_b"]), default=str)
+            elif tool_name == "weather":
+                return json.dumps(mgr.weather(), default=str)
+
+        # ── Backend-powered analysis tools (complex logic lives in main.py) ─
+        if tool_name == "energy_analysis":
+            driver = tool_input.get("driver", "VER")
+            # Resolve fuzzy driver name if f1_mcp is available
+            if mgr is not None and mgr.is_loaded:
+                try:
+                    driver = mgr._resolve_driver(driver)
+                except ValueError:
+                    pass
+            data = get_energy(driver=driver)
+            return json.dumps(_sanitize(data))
+        elif tool_name == "tyre_predictions":
+            data = get_predictions()
+            return json.dumps(_sanitize(data))
+        elif tool_name == "session_insights":
+            data = get_insights()
+            return json.dumps(_sanitize(data))
+        elif tool_name == "overtake_probability":
+            lap = tool_input.get("lap") or None
+            data = get_overtake_probability(lap=lap)
+            return json.dumps(_sanitize(data))
+        elif tool_name == "track_evolution":
+            data = get_track_evolution()
+            return json.dumps(_sanitize(data))
+        elif tool_name == "win_probability":
+            lap = tool_input.get("lap", 1)
+            data = get_replay(lap=lap)
+            return json.dumps(_sanitize(data))
+
+        # ── Backend-only tools (live data, regulations) ──────────────────
+        elif tool_name == "get_regulation_info":
+            data = get_session_profile()
+        elif tool_name == "get_live_timing":
+            data = get_live_data()
+        elif tool_name == "get_live_driver_detail":
+            data = get_live_driver_logged(driver_number=tool_input.get("driver_number", "1"))
+        elif tool_name == "get_live_driver_zones":
+            data = get_driver_zone_analysis(driver_number=tool_input.get("driver_number", "1"))
+        # ── Fallbacks when f1_mcp is not available/loaded ────────────────
+        elif tool_name == "race_result":
+            data = get_overview()
+        elif tool_name in ("qualifying_result", "session_summary"):
+            s = _get_session()
+            data = {"event": s.event["EventName"], "year": int(s.event.year), "session": s.name}
+        elif tool_name == "list_drivers":
+            data = get_drivers()
+        elif tool_name in ("lap_times", "fastest_laps"):
+            data = get_laptimes()
+        elif tool_name in ("pit_stops", "tire_stints"):
+            data = get_pit_strategy()
+        elif tool_name == "driver_telemetry":
+            drivers = tool_input.get("driver", "VER")
+            data = get_telemetry_multi(drivers=drivers)
+        elif tool_name == "head_to_head":
+            drv_a = tool_input.get("driver_a", "VER")
+            drv_b = tool_input.get("driver_b", "HAM")
+            data = get_telemetry_multi(drivers=f"{drv_a},{drv_b}")
+        elif tool_name == "weather":
+            data = get_overview()
+        else:
+            return json.dumps({"error": f"Unknown tool: {tool_name}"})
+
+        result = json.dumps(_sanitize(data))
+        if len(result) > 15000:
+            # Don't break JSON — return a summary note instead of mangled data
+            result = json.dumps({
+                "_truncated": True,
+                "_hint": "Response too large. Ask about a specific driver or use a more targeted tool.",
+                "_size": len(result),
+            })
+        return result
+    except HTTPException as e:
+        return json.dumps({"error": e.detail})
+    except Exception as e:
+        return json.dumps({"error": str(e)})
 
 
 # ── Track Map ──────────────────────────────────────────────────────────────

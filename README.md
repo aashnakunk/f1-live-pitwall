@@ -166,9 +166,96 @@ f1_dashboard/
 
 ---
 
+## Developer Commands
+
+### Stop everything
+```bash
+./start.sh stop
+```
+
+### Rebuild frontend + restart everything
+```bash
+./start.sh stop
+cd frontend && npm install && npm run build && cd ..
+./start.sh
+```
+
+### Quick restart (no rebuild, just restart servers)
+```bash
+./start.sh stop
+./start.sh
+```
+
+### Install/update backend dependencies
+```bash
+source venv/bin/activate
+pip install -r requirements.txt
+pip install -e f1_mcp/   # local MCP package
+```
+
+### Nuclear reset (kill stale processes, rebuild, restart)
+```bash
+./start.sh stop
+lsof -ti:8000 | xargs kill -9 2>/dev/null
+lsof -ti:3000 | xargs kill -9 2>/dev/null
+cd frontend && npm install && npm run build && cd ..
+./start.sh
+```
+
+---
+
+## F1 MCP Server
+
+The `f1_mcp/` directory contains a standalone MCP server package for F1 race intelligence. It powers the dashboard's AI chat and can also be connected to Claude Desktop or any MCP-compatible client.
+
+### Use with Claude Desktop
+
+1. Install the package:
+```bash
+pip install -e f1_mcp/
+```
+
+2. Add to Claude Desktop config (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+```json
+{
+  "mcpServers": {
+    "f1": {
+      "command": "python",
+      "args": ["-m", "f1_mcp"]
+    }
+  }
+}
+```
+
+3. Restart Claude Desktop. Ask: *"Load the 2024 Monaco qualifying and tell me who got pole"*
+
+### MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `load_session` | Load a race/quali/practice (fuzzy race names) |
+| `season_calendar` | F1 calendar for a year |
+| `race_result` | Full race classification |
+| `qualifying_result` | Q1/Q2/Q3 times |
+| `lap_times` | Lap-by-lap data for a driver |
+| `fastest_laps` | Fastest laps ranked |
+| `pit_stops` | Pit stop details |
+| `tire_stints` | Tyre compound breakdown |
+| `driver_telemetry` | Speed/throttle/brake summary |
+| `head_to_head` | Two-driver comparison |
+| `weather` | Session weather |
+| `session_summary` | Quick overview |
+| `identify_driver` | Fuzzy name resolution |
+| `list_drivers` | All drivers in session |
+
+Driver names are fuzzy-matched: "Leclerc", "charles", "LEC", "16" all resolve to Charles Leclerc.
+
+---
+
 ## Notes
 
 - **Caching:** FastF1 caches session data in `cache/`. First load hits F1 servers; subsequent loads are instant.
+- **AI Chat:** Uses MCP-style tool calling — Claude picks which data to fetch per question. Tool calls are shown as green tags below each message.
 - **AI Debrief:** Requires an Anthropic API key entered in the UI.
 - **Live timing:** Connects to F1's SignalR stream during live sessions. Uses incremental parsing for sub-second updates even with large data files.
 - **Win probability:** Position, gap, tyre age, and compound with softmax temperature. SC/VSC-aware — shifts weights toward tyre freshness when gaps are neutralized.

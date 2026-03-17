@@ -84,7 +84,11 @@ export default function ChatWidget() {
       const result = await res.json();
       setMessages((prev) => [
         ...prev,
-        { role: "assistant", content: result.reply },
+        {
+          role: "assistant",
+          content: result.reply,
+          toolsCalled: result.tools_called || [],
+        },
       ]);
     } catch (e) {
       setMessages((prev) => [
@@ -233,14 +237,30 @@ export default function ChatWidget() {
                   key={i}
                   className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
                 >
-                  <div
-                    className={`max-w-[85%] px-3 py-2 rounded-xl text-xs leading-relaxed ${
-                      msg.role === "user"
-                        ? "bg-f1-red/20 text-white rounded-br-sm"
-                        : "bg-white/5 text-zinc-300 rounded-bl-sm border border-f1-border/30"
-                    }`}
-                  >
-                    <div className="whitespace-pre-wrap">{msg.content}</div>
+                  <div className="max-w-[85%]">
+                    <div
+                      className={`px-3 py-2 rounded-xl text-xs leading-relaxed ${
+                        msg.role === "user"
+                          ? "bg-f1-red/20 text-white rounded-br-sm"
+                          : "bg-white/5 text-zinc-300 rounded-bl-sm border border-f1-border/30"
+                      }`}
+                    >
+                      <div className="whitespace-pre-wrap">{msg.content}</div>
+                    </div>
+                    {msg.toolsCalled && msg.toolsCalled.length > 0 && (
+                      <div className="flex flex-wrap gap-1 mt-1 px-1">
+                        {msg.toolsCalled.map((tc, j) => (
+                          <span
+                            key={j}
+                            className="inline-flex items-center gap-1 text-[9px] text-zinc-500 bg-white/[0.03] border border-white/5 rounded px-1.5 py-0.5"
+                            title={tc.input ? JSON.stringify(tc.input) : "no args"}
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/60" />
+                            {tc.tool}
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
               ))}
