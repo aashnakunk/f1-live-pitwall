@@ -564,7 +564,7 @@ class SessionManager:
                 "pace_delta": round(ahead_pace - behind_pace, 3) if ahead_pace and behind_pace else None,
             }
             if ahead_grid and behind_grid:
-                entry["ahead_gained"] = int(behind_grid) - (i + 1) if behind_grid else None
+                entry["ahead_gained"] = int(ahead_grid) - (i + 1) if ahead_grid else None
                 entry["behind_gained"] = int(behind_grid) - (i + 2) if behind_grid else None
 
             analysis.append(entry)
