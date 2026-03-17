@@ -1674,6 +1674,9 @@ Rules:
 
     # Track which tools Claude calls (returned to frontend for visibility)
     tools_called = []
+    total_input_tokens = 0
+    total_output_tokens = 0
+    api_calls = 0
 
     try:
         client = anthropic.Anthropic(api_key=req.apiKey)
@@ -1688,6 +1691,10 @@ Rules:
                 messages=messages,
                 tools=tools,
             )
+            api_calls += 1
+            if response.usage:
+                total_input_tokens += response.usage.input_tokens
+                total_output_tokens += response.usage.output_tokens
 
             # If Claude is done (no tool calls), extract text and return
             if response.stop_reason == "end_turn":
@@ -1695,6 +1702,11 @@ Rules:
                 return {
                     "reply": " ".join(text_parts) if text_parts else "No response generated.",
                     "tools_called": tools_called,
+                    "usage": {
+                        "input_tokens": total_input_tokens,
+                        "output_tokens": total_output_tokens,
+                        "api_calls": api_calls,
+                    },
                 }
 
             # Process tool calls
@@ -1722,11 +1734,21 @@ Rules:
                 return {
                     "reply": " ".join(text_parts) if text_parts else "Unexpected response.",
                     "tools_called": tools_called,
+                    "usage": {
+                        "input_tokens": total_input_tokens,
+                        "output_tokens": total_output_tokens,
+                        "api_calls": api_calls,
+                    },
                 }
 
         return {
             "reply": "I needed too many data lookups. Please try a more specific question.",
             "tools_called": tools_called,
+            "usage": {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "api_calls": api_calls,
+            },
         }
 
     except Exception as e:
