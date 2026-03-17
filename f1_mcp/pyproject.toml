@@ -12,5 +12,14 @@ dependencies = [
     "mcp>=1.0.0",
 ]
 
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
 [project.scripts]
 f1-mcp = "f1_mcp.server:main"
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: tests that download real F1 data (slow first run, cached after)",
+]
+testpaths = ["tests"]
