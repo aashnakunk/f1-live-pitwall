@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "f1-mcp"
+version = "0.1.0"
+description = "Local MCP server for Formula 1 race intelligence — connect to Claude Desktop or any MCP client"
+requires-python = ">=3.10"
+dependencies = [
+    "fastf1>=3.3.0",
+    "mcp>=1.0.0",
+]
+
+[project.scripts]
+f1-mcp = "f1_mcp.server:main"
